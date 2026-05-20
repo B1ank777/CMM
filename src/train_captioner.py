@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from functools import partial
 from pathlib import Path
 from typing import Dict
 
@@ -173,7 +174,7 @@ def build_train_loader(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        collate_fn=lambda batch: collate_fn(batch, pad_id=vocab.pad_id),
+        collate_fn=partial(collate_fn, pad_id=vocab.pad_id),
     )
 
 
