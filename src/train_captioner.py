@@ -74,7 +74,9 @@ def check_paths(coco_root: Path) -> None:
     """检查 COCO 数据集所需路径是否存在，缺失则抛出 FileNotFoundError。"""
     required = [
         coco_root / "train2014",
+        coco_root / "val2014",
         coco_root / "annotations" / "captions_train2014.json",
+        coco_root / "annotations" / "captions_val2014.json",
     ]
     missing = [p for p in required if not p.exists()]
     if missing:
@@ -149,6 +151,41 @@ def train_one_epoch(
     return total_loss / len(loader)
 
 
+@torch.no_grad()
+def validate_one_epoch(
+    model: CaptionTransformer,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> tuple[float, float]:
+    """执行一个验证 epoch，返回 (val_loss, val_token_acc)。"""
+    model.eval()
+    total_loss = 0.0
+    total_correct = 0
+    total_tokens = 0
+
+    progress = tqdm(loader, desc="val", leave=False)
+    for images, captions in progress:
+        images = images.to(device, non_blocking=True)
+        captions = captions.to(device, non_blocking=True)
+
+        input_tokens = captions[:, :-1]
+        target_tokens = captions[:, 1:]
+
+        logits = model(images, input_tokens)
+        loss = criterion(logits.reshape(-1, logits.size(-1)), target_tokens.reshape(-1))
+        total_loss += loss.item()
+
+        preds = logits.argmax(dim=-1)
+        valid_mask = target_tokens.ne(model.pad_id)
+        total_correct += (preds.eq(target_tokens) & valid_mask).sum().item()
+        total_tokens += valid_mask.sum().item()
+
+    mean_loss = total_loss / len(loader)
+    token_acc = total_correct / max(total_tokens, 1)
+    return mean_loss, token_acc
+
+
 def build_train_loader(
     coco_root: Path,
     vocab: Vocabulary,
@@ -172,6 +209,32 @@ def build_train_loader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        collate_fn=partial(collate_fn, pad_id=vocab.pad_id),
+    )
+
+
+def build_val_loader(
+    coco_root: Path,
+    vocab: Vocabulary,
+    max_len: int,
+    batch_size: int,
+    num_workers: int,
+) -> DataLoader:
+    """构建 COCO 验证数据的 DataLoader（teacher-forcing 验证）。"""
+    dataset = CocoCaptionDataset(
+        image_dir=str(coco_root / "val2014"),
+        annotation_file=str(coco_root / "annotations" / "captions_val2014.json"),
+        vocab=vocab,
+        transform=default_image_transform(image_size=224),
+        max_len=max_len,
+    )
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         collate_fn=partial(collate_fn, pad_id=vocab.pad_id),
@@ -232,6 +295,13 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
+    val_loader = build_val_loader(
+        coco_root=args.coco_root,
+        vocab=vocab,
+        max_len=args.max_len,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
 
     # 构建模型
     model = CaptionTransformer(
@@ -263,6 +333,7 @@ def main() -> None:
         print(f"GPU Memory (GB): {total_mem_gb:.2f}")
     print(f"Vocab size: {len(vocab.stoi)}")
     print(f"Train samples: {len(loader.dataset)}")
+    print(f"Val samples: {len(val_loader.dataset)}")
     print(f"AMP enabled: {use_amp}")
 
     # 训练循环
@@ -278,7 +349,16 @@ def main() -> None:
             accum_steps=args.accum_steps,
             use_amp=use_amp,
         )
-        print(f"epoch={epoch}, loss={loss:.4f}")
+        val_loss, val_acc = validate_one_epoch(
+            model=model,
+            loader=val_loader,
+            criterion=criterion,
+            device=device,
+        )
+        print(
+            f"epoch={epoch}, "
+            f"train_loss={loss:.4f}, val_loss={val_loss:.4f}, val_token_acc={val_acc:.4f}"
+        )
 
         # 每 epoch 保存一次检查点
         save_checkpoint(
