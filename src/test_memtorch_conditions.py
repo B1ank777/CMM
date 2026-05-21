@@ -79,6 +79,13 @@ def parse_args() -> argparse.Namespace:
         help="是否使用 memtorch 的 C++ binding 加速",
     )
     parser.add_argument(
+        "--scope",
+        type=str,
+        default="decoder_only",
+        choices=["output_only", "layers_only", "decoder_only"],
+        help="MemTorch patch scope",
+    )
+    parser.add_argument(
         "--tile-rows", type=int, default=128,
         help="交叉阵列分块行数",
     )
@@ -236,6 +243,7 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
         mem_model = build_memristive_model(
             model=noisy_model,
             use_bindings=args.use_bindings,
+            scope=args.scope,
             tile_shape=(args.tile_rows, args.tile_cols),
             max_input_voltage=args.max_input_voltage,
             adc_resolution=args.adc_resolution,
@@ -261,6 +269,7 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                     "adc_resolution": args.adc_resolution,
                     "r_on": args.ron,
                     "r_off": args.roff,
+                    "mapping_scope": args.scope,
                 },
             },
             out_path,

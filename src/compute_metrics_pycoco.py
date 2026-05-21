@@ -74,11 +74,16 @@ def load_mem_model(mem_checkpoint: Path, baseline_model, device: torch.device):
     """加载忆阻器映射后的模型，使用基线模型结构 + 映射权重"""
     mem_payload = torch.load(mem_checkpoint, map_location="cpu")
     mem_args = mem_payload.get("memtorch_args", {})
+    mapping_scope = mem_args.get("mapping_scope", "decoder_only")
+    use_bindings = False
+    if bool(mem_args.get("use_bindings", False)):
+        print(f"Info: loading {mem_checkpoint.name} with use_bindings=False for inference compatibility.")
 
     # 根据映射参数构建忆阻器模型
     mem_model = build_memristive_model(
         model=baseline_model,
-        use_bindings=bool(mem_args.get("use_bindings", False)),
+        use_bindings=use_bindings,
+        scope=mapping_scope,
         tile_shape=tuple(mem_args.get("tile_shape", (128, 128))),
         max_input_voltage=float(mem_args.get("max_input_voltage", 0.3)),
         adc_resolution=int(mem_args.get("adc_resolution", 8)),

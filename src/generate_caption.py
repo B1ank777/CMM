@@ -19,6 +19,8 @@ from PIL import Image
 from .coco_preprocess.loader import default_image_transform
 from .coco_preprocess.tokenizer import WordTokenizer
 from .coco_preprocess.vocab import Vocabulary
+# build_model_from_payload: 从检查点配置重建 CaptionTransformer 结构
+# build_memristive_model: 将模型权重映射为忆阻器交叉阵列仿真模型
 from .map_memtorch import build_memristive_model, build_model_from_payload
 
 
@@ -94,35 +96,36 @@ def main() -> None:
     state_dict = payload.get("model_state_dict")
     if state_dict is not None:
         # 标准训练检查点：直接加载权重到 CaptionTransformer
-        model = build_model_from_payload(payload)
-        model.load_state_dict(state_dict)
+        model = build_model_from_payload(payload)  # 从配置重建模型结构
+        model.load_state_dict(state_dict)           # 加载训练权重
     elif "mem_model_state_dict" in payload:
         # 忆阻器映射后的检查点：需要先构建忆阻器模型结构，再加载权重
         model = build_model_from_payload(payload)
         mem_args = payload.get("memtorch_args", {})
-        # The state_dict is compatible between bindings/non-bindings variants.
-        # Prefer the Python path by default because memtorch 1.1.6 bindings can
-        # fail at tiled_inference with signature mismatches during generation.
+        # state_dict 在 bindings / 非 bindings 两种变体间兼容。
+        # 默认走 Python 推理路径，因为 memtorch 1.1.6 的 bindings 在生成时
+        # 可能因 tiled_inference 签名不匹配而失败。
         use_bindings = args.use_bindings and bool(mem_args.get("use_bindings", False))
         if bool(mem_args.get("use_bindings", False)) and not use_bindings:
-            print("Info: loading MemTorch checkpoint with use_bindings=False for inference compatibility.")
-        model = build_memristive_model(
+            print("Info: 加载 MemTorch 检查点时强制使用 use_bindings=False 以确保推理兼容性。")
+        model = build_memristive_model(  # 构建忆阻器交叉阵列仿真模型
             model=model,
             use_bindings=use_bindings,
-            tile_shape=tuple(mem_args.get("tile_shape", (128, 128))),
-            max_input_voltage=float(mem_args.get("max_input_voltage", 0.3)),
-            adc_resolution=int(mem_args.get("adc_resolution", 8)),
-            ron=float(mem_args.get("r_on", 1e2)),
-            roff=float(mem_args.get("r_off", 1e4)),
+            scope=mem_args.get("mapping_scope", "decoder_only"),
+            tile_shape=tuple(mem_args.get("tile_shape", (128, 128))),       # 交叉阵列分块大小
+            max_input_voltage=float(mem_args.get("max_input_voltage", 0.3)), # 最大输入电压
+            adc_resolution=int(mem_args.get("adc_resolution", 8)),           # ADC 分辨率
+            ron=float(mem_args.get("r_on", 1e2)),                            # 低阻态
+            roff=float(mem_args.get("r_off", 1e4)),                          # 高阻态
         )
-        model.load_state_dict(payload["mem_model_state_dict"])
+        model.load_state_dict(payload["mem_model_state_dict"])  # 加载映射后的权重
     else:
         raise ValueError(
             "Checkpoint payload missing both 'model_state_dict' (standard) "
             "and 'mem_model_state_dict' (memristor-mapped)."
         )
 
-    model.to(device)
+    model.to(device)  # 将模型移至目标设备
 
     # 读取图片并生成描述
     image_tensor = load_image_tensor(args.image)
