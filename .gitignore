@@ -1,6 +1,6 @@
 data/
-MEMTORCH_GUIDE.md
 checkpoints/
 src/__pycache__/
 *.pt
 CLAUDE.md
+CROSSSIM_GUIDE.md

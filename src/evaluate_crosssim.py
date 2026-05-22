@@ -1,27 +1,53 @@
 from __future__ import annotations
 
+# 标准库
 import argparse
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+# 深度学习框架
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+# COCO 数据管线
 from .coco_preprocess.coco_io import load_coco_captions
 from .coco_preprocess.dataset import CocoCaptionDataset, collate_fn
 from .coco_preprocess.loader import DEFAULT_COCO_ROOT, default_image_transform
 from .coco_preprocess.tokenizer import WordTokenizer
 from .coco_preprocess.vocab import Vocabulary
-from .map_memtorch import build_memristive_model, build_model_from_payload, load_checkpoint
+
+# CrossSim 模型映射工具
+from .map_crosssim import (
+    build_model_from_crosssim_payload,
+    build_model_from_payload,
+    load_checkpoint,
+    synchronize_crosssim_cores,
+)
+
+# 运行示例：
+#   # 评估 CrossSim 映射模型 vs 数字基线（默认 100 batch）
+#   python -m src.evaluate_crosssim --checkpoint checkpoints/caption_transformer_epoch_10.pt --crosssim-checkpoint checkpoints/caption_transformer_crosssim.pt
+#        
+#   # 限制评估 batch 数，使用验证集子集以加快评估
+#   python -m src.evaluate_crosssim --checkpoint checkpoints/caption_transformer_epoch_10.pt
+#       --crosssim-checkpoint checkpoints/crosssim_gpu.pt \
+#       --max-batches 50 --subset-size 500
+#
+#   # CPU 评估，指定 COCO 根目录
+#   python -m src.evaluate_crosssim \
+#       --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+#       --crosssim-checkpoint checkpoints/caption_transformer_crosssim.pt \
+#       --device cpu --coco-root /data/coco
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate baseline vs MemTorch model")
+    """解析基线模型与 CrossSim 模型对比评估参数。"""
+    parser = argparse.ArgumentParser(description="Evaluate baseline vs CrossSim model")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Baseline training checkpoint")
-    parser.add_argument("--mem-checkpoint", type=Path, required=True, help="MemTorch checkpoint")
+    parser.add_argument("--crosssim-checkpoint", type=Path, required=True, help="CrossSim checkpoint")
     parser.add_argument("--coco-root", type=Path, default=DEFAULT_COCO_ROOT)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -36,15 +62,18 @@ def build_vocab_from_payload_or_data(
     coco_root: Path,
     min_freq: int = 5,
 ) -> Vocabulary:
+    """优先从 checkpoint 恢复词表；缺失时从 COCO 训练标注重建。"""
     tokenizer = WordTokenizer()
     vocab = Vocabulary(tokenizer=tokenizer, min_freq=min_freq)
 
+    # 若 checkpoint 中包含词表映射，直接恢复
     if "vocab_stoi" in payload and payload["vocab_stoi"]:
         stoi = payload["vocab_stoi"]
         vocab.stoi = stoi
         vocab.itos = {i: w for w, i in stoi.items()}
         return vocab
 
+    # 否则从 COCO 训练集标注构建词表
     _, train_caps = load_coco_captions(str(coco_root / "annotations" / "captions_train2014.json"))
     vocab.build(train_caps)
     return vocab
@@ -58,6 +87,7 @@ def build_val_loader(
     num_workers: int,
     subset_size: int,
 ) -> DataLoader:
+    """构建 COCO val2014 DataLoader。"""
     dataset = CocoCaptionDataset(
         image_dir=str(coco_root / "val2014"),
         annotation_file=str(coco_root / "annotations" / "captions_val2014.json"),
@@ -66,6 +96,7 @@ def build_val_loader(
         max_len=max_len,
     )
 
+    # 可选：仅使用验证集的子集以加快评估
     if subset_size > 0:
         subset_size = min(subset_size, len(dataset))
         dataset = Subset(dataset, range(subset_size))
@@ -89,6 +120,7 @@ def evaluate_single_model(
     max_batches: int,
     pad_id: int,
 ) -> Tuple[float, float]:
+    """计算 loss 与 token accuracy（teacher forcing 模式）。"""
     model.eval()
     total_loss = 0.0
     total_tokens = 0
@@ -102,11 +134,14 @@ def evaluate_single_model(
         images = images.to(device, non_blocking=True)
         captions = captions.to(device, non_blocking=True)
 
+        # Teacher forcing：输入去掉最后一个 token，目标去掉第一个 token
         input_tokens = captions[:, :-1]
         target_tokens = captions[:, 1:]
         logits = model(images, input_tokens)
+        # 展平为 (B*L, V) × (B*L) 计算交叉熵
         loss = criterion(logits.reshape(-1, logits.size(-1)), target_tokens.reshape(-1))
 
+        # 按 token 级别统计准确率，排除 padding 位置
         preds = logits.argmax(dim=-1)
         valid_mask = target_tokens.ne(pad_id)
         correct = preds.eq(target_tokens) & valid_mask
@@ -124,13 +159,17 @@ def evaluate_single_model(
 @torch.no_grad()
 def compare_logits(
     base_model: nn.Module,
-    mem_model: nn.Module,
+    crosssim_model: nn.Module,
     loader: DataLoader,
     device: torch.device,
     max_batches: int,
 ) -> Tuple[float, float, float]:
+    """比较数字模型与 CrossSim 模型的 logits 差异。
+
+    返回 (MAE, Max Error, RMSE) 三个指标，衡量忆阻器映射带来的输出偏差。
+    """
     base_model.eval()
-    mem_model.eval()
+    crosssim_model.eval()
 
     total_mae = 0.0
     total_mse = 0.0
@@ -145,10 +184,12 @@ def compare_logits(
         captions = captions.to(device, non_blocking=True)
         input_tokens = captions[:, :-1]
 
+        # 分别前向传播，比较 logits 差异
         logits_base = base_model(images, input_tokens)
-        logits_mem = mem_model(images, input_tokens)
+        logits_crosssim = crosssim_model(images, input_tokens)
 
-        diff = logits_base - logits_mem
+        # 统计逐元素差异：平均绝对误差 / 最大误差 / 均方根误差
+        diff = logits_base - logits_crosssim
         abs_diff = diff.abs()
         total_mae += abs_diff.mean().item()
         total_mse += diff.square().mean().item()
@@ -161,6 +202,7 @@ def compare_logits(
 
 
 def load_baseline_model(checkpoint: Path, device: torch.device):
+    """加载原始数字基线模型（原始 nn.Linear，未经忆阻器映射）。"""
     payload, state = load_checkpoint(checkpoint, map_location="cpu")
     model = build_model_from_payload(payload)
     model.load_state_dict(state)
@@ -169,37 +211,39 @@ def load_baseline_model(checkpoint: Path, device: torch.device):
     return model, payload
 
 
-def load_mem_model(mem_checkpoint: Path, baseline_model: nn.Module, device: torch.device):
-    mem_payload = torch.load(mem_checkpoint, map_location="cpu")
-    mem_args = mem_payload.get("memtorch_args", {})
-    mapping_scope = mem_args.get("mapping_scope", "decoder_only")
+def load_crosssim_model(crosssim_checkpoint: Path, baseline_model: nn.Module, device: torch.device):
+    """加载 CrossSim checkpoint，并在 load_state_dict 后同步内部阵列。
 
-    if bool(mem_args.get("use_bindings", False)):
-        print(f"Info: loading {mem_checkpoint.name} with use_bindings=False for inference compatibility.")
+    CrossSim 模型内部维护了与 weight 分离的器件电导状态，
+    load_state_dict 后必须调用 synchronize 将电导写回到模拟阵列中。
+    """
+    crosssim_payload = torch.load(crosssim_checkpoint, map_location="cpu")
+    crosssim_args = crosssim_payload.get("crosssim_args")
+    if not crosssim_args:
+        raise ValueError("CrossSim checkpoint missing 'crosssim_args'.")
+    if "crosssim_model_state_dict" not in crosssim_payload:
+        raise ValueError("CrossSim checkpoint missing 'crosssim_model_state_dict'.")
 
-    mem_model = build_memristive_model(
-        model=baseline_model,
-        use_bindings=False,
-        scope=mapping_scope,
-        tile_shape=tuple(mem_args.get("tile_shape", (128, 128))),
-        max_input_voltage=float(mem_args.get("max_input_voltage", 0.3)),
-        adc_resolution=int(mem_args.get("adc_resolution", 8)),
-        ron=float(mem_args.get("r_on", 1e2)),
-        roff=float(mem_args.get("r_off", 1e4)),
-    )
-    mem_model.load_state_dict(mem_payload["mem_model_state_dict"])
-    mem_model.to(device)
-    mem_model.eval()
-    return mem_model, mem_payload
+    # 以基线模型结构为模板，构建 CrossSim 版本的模型
+    crosssim_model = build_model_from_crosssim_payload(baseline_model, crosssim_args, device)
+    crosssim_model.load_state_dict(crosssim_payload["crosssim_model_state_dict"])
+    # 将加载的权重同步到 CrossSim 内部器件阵列
+    synchronize_crosssim_cores(crosssim_model)
+    crosssim_model.to(device)
+    crosssim_model.eval()
+    return crosssim_model, crosssim_payload
 
 
 def main() -> None:
+    """主流程：加载模型、跑验证集、打印 CrossSim 对比指标。"""
     args = parse_args()
     device = torch.device(args.device)
 
+    # 加载基线模型与 CrossSim 模型
     base_model, base_payload = load_baseline_model(args.checkpoint, device)
-    mem_model, mem_payload = load_mem_model(args.mem_checkpoint, base_model, device)
+    crosssim_model, crosssim_payload = load_crosssim_model(args.crosssim_checkpoint, base_model, device)
 
+    # 构建词表与验证集 DataLoader
     vocab = build_vocab_from_payload_or_data(base_payload, args.coco_root)
     max_len = int(base_payload["model_config"]["max_len"])
 
@@ -212,31 +256,35 @@ def main() -> None:
         subset_size=args.subset_size,
     )
 
+    # 忽略 padding token 的交叉熵损失
     criterion = nn.CrossEntropyLoss(ignore_index=vocab.pad_id)
 
+    # 分别评估两个模型的 loss 与准确率
     base_loss, base_acc = evaluate_single_model(
         base_model, loader, criterion, device, args.max_batches, vocab.pad_id
     )
-    mem_loss, mem_acc = evaluate_single_model(
-        mem_model, loader, criterion, device, args.max_batches, vocab.pad_id
+    crosssim_loss, crosssim_acc = evaluate_single_model(
+        crosssim_model, loader, criterion, device, args.max_batches, vocab.pad_id
     )
+    # 比较两模型的 logits 输出差异
     logit_mae, logit_max_error, logit_rmse = compare_logits(
-        base_model, mem_model, loader, device, args.max_batches
+        base_model, crosssim_model, loader, device, args.max_batches
     )
 
+    # 打印评估结果汇总
     print("=== Evaluation Summary ===")
     print(f"Device: {device}")
-    mem_args = mem_payload.get("memtorch_args", {})
-    # 打印实际从 mem checkpoint 读取到的映射配置，避免误以为评估阶段仍在使用默认参数。
-    print(f"Mem scope: {mem_args.get('mapping_scope', 'decoder_only')}")
-    print(f"Mem tile shape: {tuple(mem_args.get('tile_shape', (128, 128)))}")
-    print(f"Mem ADC resolution: {mem_args.get('adc_resolution', 8)}")
-    print(f"Mem max input voltage: {mem_args.get('max_input_voltage', 0.3)}")
+    crosssim_args = crosssim_payload.get("crosssim_args", {})
+    # 打印 checkpoint 中实际记录的映射参数，避免评估时误判实验条件
+    print(f"CrossSim scope: {crosssim_args.get('mapping_scope', 'decoder_only')}")
+    print(f"CrossSim tile shape: {tuple(crosssim_args.get('tile_shape', (128, 128)))}")
+    print(f"CrossSim ADC/DAC: {crosssim_args.get('adc_resolution', 0)}/{crosssim_args.get('dac_resolution', 0)}")
+    print(f"CrossSim GPU: {crosssim_args.get('use_gpu', False)}")
     print(f"Batches evaluated: {args.max_batches}")
     print(f"Baseline  loss: {base_loss:.6f}, token_acc: {base_acc:.6f}")
-    print(f"MemTorch  loss: {mem_loss:.6f}, token_acc: {mem_acc:.6f}")
-    print(f"Delta loss (mem - base): {mem_loss - base_loss:.6f}")
-    print(f"Delta acc  (mem - base): {mem_acc - base_acc:.6f}")
+    print(f"CrossSim  loss: {crosssim_loss:.6f}, token_acc: {crosssim_acc:.6f}")
+    print(f"Delta loss (crosssim - base): {crosssim_loss - base_loss:.6f}")
+    print(f"Delta acc  (crosssim - base): {crosssim_acc - base_acc:.6f}")
     print(f"Logit MAE: {logit_mae:.6f}")
     print(f"Logit Max Error: {logit_max_error:.6f}")
     print(f"Logit RMSE: {logit_rmse:.6f}")

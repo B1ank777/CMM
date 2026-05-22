@@ -13,6 +13,8 @@
 - [x] 评估脚本（BLEU/METEOR/ROUGE）
 - [x] MemTorch 映射脚本（map_memtorch.py）
 - [x] 批量写入噪声条件构建脚本（test_memtorch_conditions.py）
+- [x] MemTorch decoder-only 映射误差消融（ADC/tile/3D-input 均排除，误差源于权重本身）
+- [ ] 更换 CrossSim 替代 MemTorch
 - [ ] VGG-16 编码器支持
 - [ ] it-10 ~ it-6 写入误差实验运行
 - [ ] Mem32 对照实验
@@ -246,7 +248,29 @@ Logit MAE: 2.620205
 
 ---
 
-## 后续计划（消融完成后）
+## 2026-05-22
+
+### 决策：更换模拟库 MemTorch → CrossSim
+
+**背景**：经过一整天的消融实验，排除了 ADC resolution（8/10/12 无差异）、tile_shape（128/256 无差异）、3D 输入适配（显式 2D 展平无差异）、output_proj 映射范围。所有表面参数调优均无法缩小 ~2.62 的 Logit MAE，误差定位为 MemTorch naive_map/naive_program/naive_scale + VTEAM 器件模型组合导致的**权重级系统性偏差**。
+
+**决定**：放弃 MemTorch，改用 **CrossSim**（Sandia 国家实验室的 crossbar 仿真框架）作为忆阻器交叉阵列建模引擎。
+
+**理由**：
+- MemTorch 的 naive_* 映射策略对 Transformer 权重矩阵的数值保真度不足，底层的 VTEAM 模型 + transistor 引入的非线性难以调参纠正
+- CrossSim 提供了更成熟的 ADC/DAC 建模、更灵活的分块策略、以及可配置的器件噪声模型
+- CrossSim 支持 Keras/TensorFlow 接口的原生权重映射（`map()` API），同时底层与 PyTorch 权重数组兼容，可以复用现有 PyTorch 模型结构
+
+**迁移计划**：
+- [ ] 安装 CrossSim 环境并验证 GPU 兼容性
+- [ ] 实现 CrossSim 的 CrossSimLinear 层，替换 nn.Linear 作为映射目标
+- [ ] 重写与 map_memtorch.py 同级的 map_crosssim.py，支持 scope 选择
+- [ ] 用相同基线 checkpoint 跑 decoder_only 映射 → evaluate 对比 Logit MAE
+- [ ] 若 Logit MAE 显著低于 2.62，继续之前未完成的写入噪声实验
+
+---
+
+## 后续计划（CrossSim 迁移完成后）
 
 - [ ] 运行 it-10 ~ it-6 写入噪声实验并记录指标
 - [ ] 分析 attention 与 FFN 对不同噪声水平的敏感度

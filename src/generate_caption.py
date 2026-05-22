@@ -19,9 +19,11 @@ from PIL import Image
 from .coco_preprocess.loader import default_image_transform
 from .coco_preprocess.tokenizer import WordTokenizer
 from .coco_preprocess.vocab import Vocabulary
-# build_model_from_payload: 从检查点配置重建 CaptionTransformer 结构
-# build_memristive_model: 将模型权重映射为忆阻器交叉阵列仿真模型
-from .map_memtorch import build_memristive_model, build_model_from_payload
+from .map_crosssim import (
+    build_model_from_crosssim_payload,
+    build_model_from_payload,
+    synchronize_crosssim_cores,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,11 +34,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="推理设备")
     parser.add_argument("--max-len", type=int, default=30, help="生成描述的最大长度")
-    parser.add_argument(
-        "--use-bindings",
-        action="store_true",
-        help="对 MemTorch 检查点显式启用 bindings。默认关闭，因为当前 memtorch 版本的 bindings 推理签名不稳定。",
-    )
     return parser.parse_args()
 
 
@@ -92,37 +89,27 @@ def main() -> None:
     # 恢复词表
     vocab = build_vocab_from_payload(payload)
 
-    # 恢复模型 —— 兼容两种检查点格式
+    # 恢复模型 —— 兼容标准训练检查点与 CrossSim 检查点。
     state_dict = payload.get("model_state_dict")
     if state_dict is not None:
         # 标准训练检查点：直接加载权重到 CaptionTransformer
         model = build_model_from_payload(payload)  # 从配置重建模型结构
         model.load_state_dict(state_dict)           # 加载训练权重
-    elif "mem_model_state_dict" in payload:
-        # 忆阻器映射后的检查点：需要先构建忆阻器模型结构，再加载权重
-        model = build_model_from_payload(payload)
-        mem_args = payload.get("memtorch_args", {})
-        # state_dict 在 bindings / 非 bindings 两种变体间兼容。
-        # 默认走 Python 推理路径，因为 memtorch 1.1.6 的 bindings 在生成时
-        # 可能因 tiled_inference 签名不匹配而失败。
-        use_bindings = args.use_bindings and bool(mem_args.get("use_bindings", False))
-        if bool(mem_args.get("use_bindings", False)) and not use_bindings:
-            print("Info: 加载 MemTorch 检查点时强制使用 use_bindings=False 以确保推理兼容性。")
-        model = build_memristive_model(  # 构建忆阻器交叉阵列仿真模型
-            model=model,
-            use_bindings=use_bindings,
-            scope=mem_args.get("mapping_scope", "decoder_only"),
-            tile_shape=tuple(mem_args.get("tile_shape", (128, 128))),       # 交叉阵列分块大小
-            max_input_voltage=float(mem_args.get("max_input_voltage", 0.3)), # 最大输入电压
-            adc_resolution=int(mem_args.get("adc_resolution", 8)),           # ADC 分辨率
-            ron=float(mem_args.get("r_on", 1e2)),                            # 低阻态
-            roff=float(mem_args.get("r_off", 1e4)),                          # 高阻态
+    elif "crosssim_model_state_dict" in payload:
+        # CrossSim 检查点：先重建 analog 层结构，再加载权重并同步内部阵列。
+        base_model = build_model_from_payload(payload)
+        base_model.to(device)
+        model = build_model_from_crosssim_payload(
+            baseline_model=base_model,
+            crosssim_args=payload.get("crosssim_args", {}),
+            device=device,
         )
-        model.load_state_dict(payload["mem_model_state_dict"])  # 加载映射后的权重
+        model.load_state_dict(payload["crosssim_model_state_dict"])
+        synchronize_crosssim_cores(model)
     else:
         raise ValueError(
             "Checkpoint payload missing both 'model_state_dict' (standard) "
-            "and 'mem_model_state_dict' (memristor-mapped)."
+            "and 'crosssim_model_state_dict' (CrossSim-mapped)."
         )
 
     model.to(device)  # 将模型移至目标设备

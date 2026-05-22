@@ -20,14 +20,19 @@ from tqdm import tqdm
 from .coco_preprocess.loader import DEFAULT_COCO_ROOT, default_image_transform
 from .coco_preprocess.tokenizer import WordTokenizer
 from .coco_preprocess.vocab import Vocabulary
-from .map_memtorch import build_memristive_model, build_model_from_payload, load_checkpoint
+from .map_crosssim import (
+    build_model_from_crosssim_payload,
+    build_model_from_payload,
+    load_checkpoint,
+    synchronize_crosssim_cores,
+)
 
 
 def parse_args() -> argparse.Namespace:
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="Evaluate caption models with pycocoevalcap")
     parser.add_argument("--baseline-checkpoint", type=Path, required=True, help="基线模型检查点路径")
-    parser.add_argument("--conditions-manifest", type=Path, required=True, help="忆阻器模型条件清单 JSON 文件")
+    parser.add_argument("--conditions-manifest", type=Path, required=True, help="CrossSim 条件模型清单 JSON 文件")
     parser.add_argument("--coco-root", type=Path, default=DEFAULT_COCO_ROOT, help="COCO 数据集根目录")
     parser.add_argument("--output", type=Path, default=Path("checkpoints/metrics_pycoco.json"), help="评测结果输出路径")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="推理设备")
@@ -70,30 +75,22 @@ def load_baseline_model(checkpoint: Path, device: torch.device):
     return model, payload
 
 
-def load_mem_model(mem_checkpoint: Path, baseline_model, device: torch.device):
-    """加载忆阻器映射后的模型，使用基线模型结构 + 映射权重"""
-    mem_payload = torch.load(mem_checkpoint, map_location="cpu")
-    mem_args = mem_payload.get("memtorch_args", {})
-    mapping_scope = mem_args.get("mapping_scope", "decoder_only")
-    use_bindings = False
-    if bool(mem_args.get("use_bindings", False)):
-        print(f"Info: loading {mem_checkpoint.name} with use_bindings=False for inference compatibility.")
+def load_crosssim_model(crosssim_checkpoint: Path, baseline_model, device: torch.device):
+    """加载 CrossSim 映射模型，使用 checkpoint 元数据重建 analog 层。"""
+    crosssim_payload = torch.load(crosssim_checkpoint, map_location="cpu")
+    crosssim_args = crosssim_payload.get("crosssim_args")
+    if not crosssim_args:
+        raise ValueError("CrossSim checkpoint missing 'crosssim_args'.")
+    if "crosssim_model_state_dict" not in crosssim_payload:
+        raise ValueError("CrossSim checkpoint missing 'crosssim_model_state_dict'.")
 
-    # 根据映射参数构建忆阻器模型
-    mem_model = build_memristive_model(
-        model=baseline_model,
-        use_bindings=use_bindings,
-        scope=mapping_scope,
-        tile_shape=tuple(mem_args.get("tile_shape", (128, 128))),
-        max_input_voltage=float(mem_args.get("max_input_voltage", 0.3)),
-        adc_resolution=int(mem_args.get("adc_resolution", 8)),
-        ron=float(mem_args.get("r_on", 1e2)),
-        roff=float(mem_args.get("r_off", 1e4)),
-    )
-    mem_model.load_state_dict(mem_payload["mem_model_state_dict"])
-    mem_model.to(device)
-    mem_model.eval()
-    return mem_model, mem_payload
+    crosssim_model = build_model_from_crosssim_payload(baseline_model, crosssim_args, device)
+    crosssim_model.load_state_dict(crosssim_payload["crosssim_model_state_dict"])
+    # load_state_dict 原地写入权重后，必须同步 CrossSim 内部 core 矩阵。
+    synchronize_crosssim_cores(crosssim_model)
+    crosssim_model.to(device)
+    crosssim_model.eval()
+    return crosssim_model, crosssim_payload
 
 
 def generate_caption(model, image_tensor, vocab, device, max_len):
@@ -156,7 +153,7 @@ def evaluate_with_pycoco(COCO, COCOEvalCap, gt_ann: Path, pred_json: Path, image
 
 
 def main() -> None:
-    """主流程：加载基线模型 -> 逐条件加载忆阻器模型 -> 生成预测 -> 计算指标并对比输出"""
+    """主流程：加载基线模型 -> 逐条件加载 CrossSim 模型 -> 生成预测 -> 计算指标。"""
     args = parse_args()
     COCO, COCOEvalCap = require_pycoco()
 
@@ -177,15 +174,15 @@ def main() -> None:
     baseline_metrics = evaluate_with_pycoco(COCO, COCOEvalCap, gt_ann, baseline_pred, image_ids)
     rows.append({"model": "baseline", "checkpoint": str(args.baseline_checkpoint), "metrics": baseline_metrics})
 
-    # 遍历条件清单，逐个评测忆阻器映射模型
+    # 遍历条件清单，逐个评测 CrossSim 映射模型
     manifest = json.loads(args.conditions_manifest.read_text(encoding="utf-8"))
     for item in manifest:
         ckpt = Path(item["checkpoint"])
         cond = item["condition"]
 
-        mem_model, _ = load_mem_model(ckpt, base_model, device)
+        crosssim_model, _ = load_crosssim_model(ckpt, base_model, device)
         pred_file = output_dir / f"{cond}_predictions.json"
-        build_predictions_json(mem_model, vocab, args.coco_root, image_ids, pred_file, device, args.max_len)
+        build_predictions_json(crosssim_model, vocab, args.coco_root, image_ids, pred_file, device, args.max_len)
         metrics = evaluate_with_pycoco(COCO, COCOEvalCap, gt_ann, pred_file, image_ids)
 
         rows.append(
@@ -197,7 +194,7 @@ def main() -> None:
             }
         )
 
-        del mem_model  # 及时释放显存
+        del crosssim_model  # 及时释放显存
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
