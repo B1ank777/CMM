@@ -14,7 +14,7 @@
 - [x] MemTorch 映射脚本（map_memtorch.py）
 - [x] 批量写入噪声条件构建脚本（test_memtorch_conditions.py）
 - [x] MemTorch decoder-only 映射误差消融（ADC/tile/3D-input 均排除，误差源于权重本身）
-- [ ] 更换 CrossSim 替代 MemTorch
+- [x] 更换 CrossSim 替代 MemTorch
 - [ ] VGG-16 编码器支持
 - [ ] it-10 ~ it-6 写入误差实验运行
 - [ ] Mem32 对照实验
@@ -261,12 +261,75 @@ Logit MAE: 2.620205
 - CrossSim 提供了更成熟的 ADC/DAC 建模、更灵活的分块策略、以及可配置的器件噪声模型
 - CrossSim 支持 Keras/TensorFlow 接口的原生权重映射（`map()` API），同时底层与 PyTorch 权重数组兼容，可以复用现有 PyTorch 模型结构
 
+### CrossSim Decoder-Only 映射结果
+
+**首个 CrossSim decoder_only 评估**（`caption_transformer_crosssim_decoder.pt`）：
+
+```text
+Device: cuda
+CrossSim scope: decoder_only
+CrossSim tile shape: (128, 128)
+CrossSim ADC/DAC: 0/0
+CrossSim GPU: True
+Batches evaluated: 100
+Baseline  loss: 2.534256, token_acc: 0.476609
+CrossSim  loss: 2.534256, token_acc: 0.476609
+Delta loss (crosssim - base): 0.000000
+Delta acc  (crosssim - base): 0.000000
+Logit MAE: 0.000001
+Logit Max Error: 0.000072
+Logit RMSE: 0.000001
+```
+
+| 指标 | MemTorch | CrossSim |
+| --- | --- | --- |
+| Loss | 5.823996 | **2.534256** |
+| Token Acc | 14.2% | **47.7%** |
+| Logit MAE | 2.62 | **1e-6** |
+| Logit Max Error | 25.6 | **7.2e-5** |
+
+**结论**：CrossSim 映射几乎无损（Logit MAE ~ 1e-6，仅为浮点舍入误差级别）。MemTorch 的问题彻底坐实为其底层 naive 映射策略 + VTEAM 器件模型导致。CrossSim 可以作为可靠的忆阻器仿真后端，可以继续写入噪声实验。
+
 **迁移计划**：
-- [ ] 安装 CrossSim 环境并验证 GPU 兼容性
-- [ ] 实现 CrossSim 的 CrossSimLinear 层，替换 nn.Linear 作为映射目标
-- [ ] 重写与 map_memtorch.py 同级的 map_crosssim.py，支持 scope 选择
-- [ ] 用相同基线 checkpoint 跑 decoder_only 映射 → evaluate 对比 Logit MAE
-- [ ] 若 Logit MAE 显著低于 2.62，继续之前未完成的写入噪声实验
+- [x] 安装 CrossSim 环境并验证 GPU 兼容性
+- [x] 实现 CrossSim 的 CrossSimLinear 层，替换 nn.Linear 作为映射目标
+- [x] 重写与 map_memtorch.py 同级的 map_crosssim.py，支持 scope 选择
+- [x] 用相同基线 checkpoint 跑 decoder_only 映射 → evaluate 对比 Logit MAE
+- [x] 若 Logit MAE 显著低于 2.62，继续之前未完成的写入噪声实验
+
+### CrossSim 写入噪声实验：it-6
+
+**首个写入噪声条件**（`crosssim_conditions/caption_transformer_it-6_crosssim.pt`，噪声 std=1e-2）：
+
+```text
+Device: cuda
+CrossSim scope: decoder_only
+CrossSim tile shape: (128, 128)
+CrossSim ADC/DAC: 0/0
+CrossSim GPU: True
+Batches evaluated: 100
+Baseline  loss: 2.534256, token_acc: 0.476609
+CrossSim  loss: 5.824668, token_acc: 0.224745
+Delta loss (crosssim - base): 3.290413
+Delta acc  (crosssim - base): -0.251864
+Logit MAE: 1.991278
+Logit Max Error: 21.485548
+Logit RMSE: 2.520760
+```
+
+| 条件 | Loss | Token Acc | Logit MAE | Logit Max Error | Logit RMSE |
+| --- | --- | --- | --- | --- | --- |
+| CrossSim 无噪声 | 2.534256 | 47.7% | 1e-6 | 7.2e-5 | 1e-6 |
+| CrossSim it-6 (1e-2) | 5.824668 | 22.5% | 1.991 | 21.49 | 2.521 |
+| MemTorch 无噪声 | 5.823996 | 14.2% | 2.620 | 25.65 | 3.416 |
+
+**分析**：
+
+- it-6 写入噪声下 CrossSim 仍有 22.5% token 准确率，优于 MemTorch **无噪声** 基线（14.2%）
+- CrossSim it-6 的 MAE（1.991）也比 MemTorch 无噪声（2.620）低 24%，再次确认 MemTorch 底层映射偏差本身就已超过 it-6 噪声的影响量级
+- it-6 噪声导致的 MAE 从 ~0 升至 1.99，说明 CrossSim 可以捕捉到写入噪声的退化效应，且数值在合理范围内
+
+**下一步**：继续跑 it-10 ~ it-6 全系列，建立 CrossSim 的写入噪声退化曲线。
 
 ---
 
