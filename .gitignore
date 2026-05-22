@@ -4,3 +4,4 @@ src/__pycache__/
 *.pt
 CLAUDE.md
 CROSSSIM_GUIDE.md
+.vscode/

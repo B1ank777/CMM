@@ -11,8 +11,12 @@ import torch.nn as nn
 from .models import CaptionTransformer
 
 # 运行示例：
-#   # 默认理想映射（无噪声、无量化），仅映射 decoder 线性层
+#   # 默认中等非理想映射（ADC=10 bit, DAC=12 bit），仅映射 decoder 线性层
 #   python -m src.map_crosssim --checkpoint checkpoints/caption_transformer_epoch_10.pt
+#
+#   # 如需理想 CrossSim 基线，显式关闭 ADC/DAC 量化
+#   python -m src.map_crosssim --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+#       --adc-resolution 0 --dac-resolution 0
 #
 #   # 指定 tile 尺寸与 ADC/DAC 分辨率
 #   python -m src.map_crosssim --checkpoint checkpoints/caption_transformer_epoch_10.pt \
@@ -59,8 +63,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tile-rows", type=int, default=128, help="交叉阵列最大行数")
     parser.add_argument("--tile-cols", type=int, default=128, help="交叉阵列最大列数")
-    parser.add_argument("--adc-resolution", type=int, default=0, help="ADC 分辨率；0 表示理想 ADC")
-    parser.add_argument("--dac-resolution", type=int, default=0, help="DAC 分辨率；0 表示理想 DAC")
+    parser.add_argument("--adc-resolution", type=int, default=10, help="ADC 分辨率；0 表示理想 ADC")
+    parser.add_argument("--dac-resolution", type=int, default=12, help="DAC 分辨率；0 表示理想 DAC")
     parser.add_argument("--bias-rows", type=int, default=0, help="bias 映射到阵列时使用的额外行数；0 表示数字 bias")
     parser.add_argument("--rmin", type=float, default=1e3, help="器件最小电阻")
     parser.add_argument("--rmax", type=float, default=1e5, help="器件最大电阻")
@@ -128,8 +132,8 @@ def should_use_crosssim_gpu(device: torch.device, requested_use_gpu: bool = Fals
 def build_crosssim_params(
     *,
     tile_shape: Tuple[int, int],
-    adc_resolution: int = 0,
-    dac_resolution: int = 0,
+    adc_resolution: int = 10,
+    dac_resolution: int = 12,
     use_gpu: bool = False,
     rmin: float = 1e3,
     rmax: float = 1e5,
@@ -137,7 +141,10 @@ def build_crosssim_params(
     read_noise_std: float = 0.0,
     programming_error_std: float = 0.0,
 ):
-    """构建 CrossSimParameters，默认采用无量化、无噪声的理想基线。"""
+    """构建 CrossSimParameters，默认采用中等非理想量化基线。
+
+    默认 ADC=10 bit、DAC=12 bit；如需理想基线，显式传入 0/0。
+    """
     from simulator import CrossSimParameters
 
     params = CrossSimParameters()
@@ -152,8 +159,16 @@ def build_crosssim_params(
             "xbar.device.Rmax": float(rmax),
             "xbar.device.cell_bits": int(cell_bits),
             # CrossSim 3.2.0 的 ADC/DAC 是 mvm/vmm 成对参数，不能直接写 xbar.adc.bits。
+            # bit 数大于 0 时必须切到量化模型，否则 IdealADC/IdealDAC 会忽略分辨率。
+            "xbar.adc.mvm.model": "QuantizerADC" if adc_resolution > 0 else "IdealADC",
+            "xbar.adc.vmm.model": "QuantizerADC" if adc_resolution > 0 else "IdealADC",
             "xbar.adc.mvm.bits": int(adc_resolution),
             "xbar.adc.vmm.bits": int(adc_resolution),
+            # 未做专门校准时使用理论最大范围，避免 QuantizerADC 读取空 calibrated_range。
+            "xbar.adc.mvm.adc_range_option": "MAX",
+            "xbar.adc.vmm.adc_range_option": "MAX",
+            "xbar.dac.mvm.model": "QuantizerDAC" if dac_resolution > 0 else "IdealDAC",
+            "xbar.dac.vmm.model": "QuantizerDAC" if dac_resolution > 0 else "IdealDAC",
             "xbar.dac.mvm.bits": int(dac_resolution),
             "xbar.dac.vmm.bits": int(dac_resolution),
             "xbar.device.read_noise.enable": read_noise_std > 0,
@@ -180,10 +195,10 @@ def build_crosssim_model(
     model: nn.Module,
     scope: str,
     tile_shape: Tuple[int, int],
-    adc_resolution: int,
-    dac_resolution: int,
-    bias_rows: int,
-    use_gpu: bool,
+    adc_resolution: int = 10,
+    dac_resolution: int = 12,
+    bias_rows: int = 0,
+    use_gpu: bool = False,
     rmin: float = 1e3,
     rmax: float = 1e5,
     cell_bits: int = 0,

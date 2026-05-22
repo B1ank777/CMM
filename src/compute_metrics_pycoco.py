@@ -188,8 +188,9 @@ def main() -> None:
         rows.append(
             {
                 "model": cond,
-                "noise_std": item.get("noise_std"),
                 "checkpoint": str(ckpt),
+                # 保留 manifest 中除路径外的条件元数据，兼容 write/read noise 与 ADC/DAC sweep。
+                **{key: value for key, value in item.items() if key not in {"condition", "checkpoint"}},
                 "metrics": metrics,
             }
         )

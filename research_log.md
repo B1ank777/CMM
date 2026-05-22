@@ -11,29 +11,10 @@
 - [x] 训练脚本（AMP + 梯度累积 + checkpoint）
 - [x] 基线模型训练完成（checkpoints/caption_transformer_epoch_10.pt）
 - [x] 评估脚本（BLEU/METEOR/ROUGE）
-- [x] MemTorch 映射脚本（map_memtorch.py）
-- [x] 批量写入噪声条件构建脚本（test_memtorch_conditions.py）
-- [x] MemTorch decoder-only 映射误差消融（ADC/tile/3D-input 均排除，误差源于权重本身）
 - [x] 更换 CrossSim 替代 MemTorch
-- [ ] VGG-16 编码器支持
-- [ ] it-10 ~ it-6 写入误差实验运行
-- [ ] Mem32 对照实验
-- [ ] 硬件性能建模（延迟/能耗/面积）
-
-### 待提交更改
-
-- `src/compute_metrics_pycoco.py` — 评估指标计算脚本
-- `src/map_memtorch.py` — MemTorch 映射修改
-- `src/test_memtorch_conditions.py` — 条件测试修改
-- `only_decoder.md` — 仅 patch decoder 的设计方案
-
-### 设计决策
-
-- 采用仅 patch decoder 的方案，避免对 CNN encoder 进行不必要的 MemTorch 映射（见 `only_decoder.md`）
-
----
-
-## 实验记录
+- [x] CrossSim decoder-only 映射验证（Logit MAE ~ 1e-6，几乎无损）
+- [x] CrossSim write noise 全系列实验（it-10 ~ it-6）
+- [x] CrossSim ADC 精度消融（adc-12 ~ adc-4）
 
 ### 基线模型（Ref-Transformer）
 
@@ -52,199 +33,12 @@
 
 | 指标 | 值 |
 |------|-----|
-| BLEU-1 | |
-| BLEU-2 | |
-| BLEU-3 | |
-| BLEU-4 | |
-| METEOR | |
-| ROUGE | |
-
-### CMM 写入噪声实验
-
-| 条件 | 噪声标准差 | BLEU-1 | BLEU-4 | METEOR | ROUGE |
-|------|-----------|--------|--------|--------|-------|
-| Ref-Transformer | 0 | | | | |
-| it-10 | 1e-6 | | | | |
-| it-9 | 1e-5 | | | | |
-| it-8 | 1e-4 | | | | |
-| it-7 | 1e-3 | | | | |
-| it-6 | 1e-2 | | | | |
-
----
-
-## 问题与发现
-
-### 2026-05-21 — MemTorch Decoder-Only 映射后模型输出严重退化
-
-**测试方式**：使用 `generate_caption` 分别加载基线模型和 MemTorch 映射后的 decoder-only 模型，对 3 张图片生成描述。
-
-**结果**：
-- `caption_transformer_epoch_10.pt`（基线模型）：3 张图片均得到有效描述
-- `caption_transformer_memtorch_decoder_only.pt`（MemTorch 映射后）：3 张图片输出均为 `a <unk> <unk> ... <unk>`（全 `<unk>` 序列）
-
-**初步判断**：当前 MemTorch 映射条件下，模型权重已严重失真，无法正常解码。需进一步量化退化程度。
-
-**下一步**：运行 `evaluate_memtorch` / `compute_metrics_pycoco` 量化与 baseline 的 BLEU/METEOR/ROUGE 差异。
-
-### 2026-05-21 — Decoder-Only MemTorch 评估量化结果
-
-**测试方式**：`python -m src.evaluate_memtorch --checkpoint checkpoints/caption_transformer_epoch_10.pt --mem-checkpoint checkpoints/caption_transformer_memtorch_decoder_only.pt --num-workers 2`
-
-```text
-Device: cuda
-Batches evaluated: 100
-Baseline  loss: 2.534256, token_acc: 0.476609
-MemTorch  loss: 5.823996, token_acc: 0.142226
-Delta loss (mem - base): 3.289740
-Delta acc  (mem - base): -0.334383
-Logit MAE: 2.620198
-```
-
-**分析**：
-- MemTorch 映射后 loss 从 2.53 飙升至 5.82（+130%），token 准确率从 47.7% 暴跌至 14.2%（-33.4 个百分点）
-- Logit MAE 高达 2.62，说明权重映射导致输出 logits 严重偏移
-- 与之前 `generate_caption` 的定性结果一致：映射后模型已实质性失效
-
-**下一步**：暂不直接跑全量 BLEU/METEOR/ROUGE 指标，先做消融实验缩小误差来源。
-
----
-
-## 下一步计划：MemTorch 映射误差消融
-
-当前最优先的任务是定位 decoder-only mapping 中误差的主要来源，而非直接跑写入噪声实验。
-
-### 消融路线图（按顺序执行）
-
-1. [x] **仅 patch `output_proj`**：将 MemTorch 映射限定在最后的 LM head，其余 decoder 层保持原始 `nn.Linear`，排除层内投影的干扰
-2. [x] **仅 patch layers（Q/K/V/O + FFN1/FFN2）**：保持 `output_proj` 为原始线性层，确认 decoder 内部 attention/FFN 的映射贡献
-3. [x] **patch layers + output_proj（当前方案对照）**：复现已有结果作为 baseline 对照
-4. [ ] **调整 `ADC_resolution`**：试 10-bit、12-bit，观察 ADC 量化精度对退化程度的影响
-5. [ ] **调整 `tile_shape`**：增大 tile 尺寸减少切 tile 带来的边界误差，观察 tile 相关退化贡献
-6. [ ] **对 it-10 / it-9 / it-8 分别做 1-5 的对比**：确认不同写入噪声水平下各消融项的变化趋势，定位最敏感组件
-
-### 判断标准
-
-- 每个消融项跑完后对比 `evaluate_memtorch` 输出的 **loss / token_acc / Logit MAE**，不再直接跑 pycocoevalcap 全量指标
-- 找到使 Logit MAE 显著下降的变量即为主要误差来源
-
-### 消融结果
-
-#### 1. 仅 patch `output_proj`（`caption_transformer_mem_output_only.pt`）
-
-```text
-Device: cuda
-Mem scope: output_only
-Batches evaluated: 100
-Baseline  loss: 2.534256, token_acc: 0.476609
-MemTorch  loss: 2.534256, token_acc: 0.476609
-Delta loss (mem - base): 0.000000
-Delta acc  (mem - base): 0.000000
-Logit MAE: 0.000000
-```
-
-**结论**：`output_proj` 单独映射对模型输出无任何影响（Logit MAE = 0）。误差来源在 decoder 层内的 Q/K/V/O / FFN1/FFN2 映射，与 `output_proj` 无关。
-
-#### 2. 仅 patch layers（`caption_transformer_mem_layers_only.pt`）
-
-```text
-Device: cuda
-Mem scope: layers_only
-Batches evaluated: 100
-Baseline  loss: 2.534256, token_acc: 0.476609
-MemTorch  loss: 5.823996, token_acc: 0.142226
-Delta loss (mem - base): 3.289740
-Delta acc  (mem - base): -0.334383
-Logit MAE: 2.620198
-```
-
-Patched 层明细：2 层 × 10 个 Linear（Q/K/V/O × 4 + FFN1/FFN2 × 2）× 2 = 20 个，均为 `(256→256)` 或 `(256↔1024)`。
-
-**结论**：仅 patch layers 的结果与 layers + output_proj 完全相同（loss / acc / MAE 三位小数点一致）。确认 **误差 100% 来自 decoder 层内映射**，`output_proj` 不贡献任何退化。下一步重点排查 ADC resolution 和 tile_shape 两个参数。
-
-#### 3. ADC_resolution = 10（`caption_transformer_mem_decoder_only_adc10.pt`）
-
-```text
-Device: cuda
-Mem scope: decoder_only
-Batches evaluated: 100
-Baseline  loss: 2.534256, token_acc: 0.476609
-MemTorch  loss: 5.824000, token_acc: 0.142281
-Delta loss (mem - base): 3.289744
-Delta acc  (mem - base): -0.334328
-Logit MAE: 2.620211
-Logit Max Error: 25.645622
-Logit RMSE: 3.416300
-```
-
-ADC=8 对照（之前 decoder_only 结果）：loss=5.823996, acc=0.142226, MAE=2.620198。
-
-**结论**：ADC 从 8-bit 提升到 10-bit **无任何改善**（MAE 差值 < 0.00002，属浮点舍入误差）。ADC 量化精度不是误差来源。继续试 adc=12 确认趋势后进入 tile_shape 排查。
-
-#### 4. ADC_resolution = 12（`caption_transformer_mem_decoder_adc12.pt`）
-
-```text
-Device: cuda
-Mem scope: decoder_only
-Batches evaluated: 100
-Baseline  loss: 2.534256, token_acc: 0.476609
-MemTorch  loss: 5.823999, token_acc: 0.142281
-Delta loss (mem - base): 3.289743
-Delta acc  (mem - base): -0.334328
-Logit MAE: 2.620212
-Logit Max Error: 25.645666
-Logit RMSE: 3.416301
-```
-
-| ADC | Loss     | Token Acc | Logit MAE | Logit Max Error | Logit RMSE |
-|-----|----------|-----------|-----------|-----------------|------------|
-| 8   | 5.823996 | 0.142226  | 2.620198  | —               | —          |
-| 10  | 5.824000 | 0.142281  | 2.620211  | 25.645622       | 3.416300   |
-| 12  | 5.823999 | 0.142281  | 2.620212  | 25.645666       | 3.416301   |
-
-**结论**：ADC 8/10/12 三位小数点完全一致。**ADC 分辨率与当前误差无关**，可彻底排除。下一步排查 tile_shape。
-
-#### 5. tile_shape = 256×256（`caption_transformer_mem_decoder_tile256.pt`）
-
-```text
-Device: cuda
-Mem scope: decoder_only
-Batches evaluated: 100
-Baseline  loss: 2.534256, token_acc: 0.476609
-MemTorch  loss: 5.823989, token_acc: 0.142281
-Delta loss (mem - base): 3.289734
-Delta acc  (mem - base): -0.334328
-Logit MAE: 2.620205
-Logit Max Error: 25.645140
-Logit RMSE: 3.416297
-```
-
-| tile_shape | Loss     | Token Acc | Logit MAE | Logit Max Error | Logit RMSE |
-|------------|----------|-----------|-----------|-----------------|------------|
-| 128×128    | 5.823996 | 0.142226  | 2.620198  | —               | —          |
-| 256×256    | 5.823989 | 0.142281  | 2.620205  | 25.645140       | 3.416297   |
-
-**结论**：tile_shape 从 128→256 无任何改善。tile 分块量化也不是误差来源。至此，ADC resolution 和 tile_shape 两个常规参数均已排除。
-
-**初步判断**：误差可能来自 MemTorch 底层 VTEAM 模型的 device-level 行为（naive_map / naive_program / naive_scale 的组合映射策略、ron/roff 器件参数、或 transistor 接入引入的非线性）。下一步可尝试：
-
-- 增大 ron/roff 比值（当前 1e2/1e4，可试 1e3/1e6 或理想化参数）
-- 关闭 transistor（`--transistor` flag 需加入 map_memtorch.py）
-- 直接对比映射前后的逐层权重差异（weight MAE per layer）定位最敏感的层
-
-### 2026-05-21 — 3D 输入显式展平消融
-
-**测试方式**：修改 `MultiHeadAttention`，将 Q/K/V/O 投影改为显式 `[B,T,D] → [B*T,D] → Linear → [B,T,D_out]`；修改 `DecoderLayer.forward` 显式调用 `self.ffn[0]` / `self.ffn[1]` 等子层，确保进入 MemTorch Linear 的输入始终是 2D，排除 `patch_memtorch_linear_input_shapes` 中 reshape 工作区的潜在问题。
-
-**结果**（`caption_transformer_mem_decoder_tile256.pt`，tile=256×256, adc=8）：
-
-```text
-MemTorch loss: 5.823989, token_acc: 0.142281
-Logit MAE: 2.620205
-```
-
-与未做显式 2D 展平的 decoder_only 结果（MAE=2.620198）完全一致。
-
-**结论**：`patch_memtorch_linear_input_shapes` 的 reshape 工作区没有问题。3D→2D→3D 的维度变换即使在代码层面显式写死，误差不变。问题不在输入形状适配，而在 MemTorch 映射后**权重本身的数值偏差**。
+| BLEU-1 | 0.6816 |
+| BLEU-4 | 0.2464 |
+| METEOR | 0.2276 |
+| ROUGE-L | 0.4954 |
+| CIDEr | 0.8546 |
+| SPICE | 0.1680 |
 
 ---
 
@@ -252,14 +46,9 @@ Logit MAE: 2.620205
 
 ### 决策：更换模拟库 MemTorch → CrossSim
 
-**背景**：经过一整天的消融实验，排除了 ADC resolution（8/10/12 无差异）、tile_shape（128/256 无差异）、3D 输入适配（显式 2D 展平无差异）、output_proj 映射范围。所有表面参数调优均无法缩小 ~2.62 的 Logit MAE，误差定位为 MemTorch naive_map/naive_program/naive_scale + VTEAM 器件模型组合导致的**权重级系统性偏差**。
+**背景**：经过一整天的消融实验，排除了 ADC resolution、tile_shape、3D 输入适配、output_proj 映射范围等因素。MemTorch 的 naive_map/naive_program/naive_scale + VTEAM 器件模型组合导致权重级系统性偏差（Logit MAE ~2.62），参数调优无法解决。
 
-**决定**：放弃 MemTorch，改用 **CrossSim**（Sandia 国家实验室的 crossbar 仿真框架）作为忆阻器交叉阵列建模引擎。
-
-**理由**：
-- MemTorch 的 naive_* 映射策略对 Transformer 权重矩阵的数值保真度不足，底层的 VTEAM 模型 + transistor 引入的非线性难以调参纠正
-- CrossSim 提供了更成熟的 ADC/DAC 建模、更灵活的分块策略、以及可配置的器件噪声模型
-- CrossSim 支持 Keras/TensorFlow 接口的原生权重映射（`map()` API），同时底层与 PyTorch 权重数组兼容，可以复用现有 PyTorch 模型结构
+**决定**：放弃 MemTorch，改用 **CrossSim**（Sandia 国家实验室的 crossbar 仿真框架）。
 
 ### CrossSim Decoder-Only 映射结果
 
@@ -281,25 +70,13 @@ Logit Max Error: 0.000072
 Logit RMSE: 0.000001
 ```
 
-| 指标 | MemTorch | CrossSim |
-| --- | --- | --- |
-| Loss | 5.823996 | **2.534256** |
-| Token Acc | 14.2% | **47.7%** |
-| Logit MAE | 2.62 | **1e-6** |
-| Logit Max Error | 25.6 | **7.2e-5** |
+**结论**：CrossSim decoder-only 映射几乎无损（Logit MAE ~ 1e-6，仅为浮点舍入误差级别）。
 
-**结论**：CrossSim 映射几乎无损（Logit MAE ~ 1e-6，仅为浮点舍入误差级别）。MemTorch 的问题彻底坐实为其底层 naive 映射策略 + VTEAM 器件模型导致。CrossSim 可以作为可靠的忆阻器仿真后端，可以继续写入噪声实验。
+### CrossSim Write Noise消融
 
-**迁移计划**：
-- [x] 安装 CrossSim 环境并验证 GPU 兼容性
-- [x] 实现 CrossSim 的 CrossSimLinear 层，替换 nn.Linear 作为映射目标
-- [x] 重写与 map_memtorch.py 同级的 map_crosssim.py，支持 scope 选择
-- [x] 用相同基线 checkpoint 跑 decoder_only 映射 → evaluate 对比 Logit MAE
-- [x] 若 Logit MAE 显著低于 2.62，继续之前未完成的写入噪声实验
+#### CrossSim Write Noise：it-6
 
-### CrossSim 写入噪声实验：it-6
-
-**首个写入噪声条件**（`crosssim_conditions/caption_transformer_it-6_crosssim.pt`，噪声 std=1e-2）：
+**噪声 std=1e-2**（`crosssim_conditions/caption_transformer_it-6_crosssim.pt`）：
 
 ```text
 Device: cuda
@@ -321,20 +98,227 @@ Logit RMSE: 2.520760
 | --- | --- | --- | --- | --- | --- |
 | CrossSim 无噪声 | 2.534256 | 47.7% | 1e-6 | 7.2e-5 | 1e-6 |
 | CrossSim it-6 (1e-2) | 5.824668 | 22.5% | 1.991 | 21.49 | 2.521 |
-| MemTorch 无噪声 | 5.823996 | 14.2% | 2.620 | 25.65 | 3.416 |
 
 **分析**：
 
-- it-6 写入噪声下 CrossSim 仍有 22.5% token 准确率，优于 MemTorch **无噪声** 基线（14.2%）
-- CrossSim it-6 的 MAE（1.991）也比 MemTorch 无噪声（2.620）低 24%，再次确认 MemTorch 底层映射偏差本身就已超过 it-6 噪声的影响量级
-- it-6 噪声导致的 MAE 从 ~0 升至 1.99，说明 CrossSim 可以捕捉到写入噪声的退化效应，且数值在合理范围内
+- it-6 write noise 导致 token 准确率从 47.7% 降至 22.5%，loss 从 2.53 升至 5.82
+- MAE 从 ~0 升至 1.99，write noise 对模型输出有显著影响
 
-**下一步**：继续跑 it-10 ~ it-6 全系列，建立 CrossSim 的写入噪声退化曲线。
+#### CrossSim Write Noise：it-7
+
+**噪声 std=1e-3**（`crosssim_conditions/caption_transformer_it-7_crosssim.pt`）：
+
+```text
+Device: cuda
+CrossSim scope: decoder_only
+CrossSim tile shape: (128, 128)
+CrossSim ADC/DAC: 0/0
+CrossSim GPU: True
+Batches evaluated: 100
+Baseline  loss: 2.534256, token_acc: 0.476609
+CrossSim  loss: 3.308090, token_acc: 0.392930
+Delta loss (crosssim - base): 0.773834
+Delta acc  (crosssim - base): -0.083679
+Logit MAE: 1.063812
+Logit Max Error: 13.412535
+Logit RMSE: 1.392701
+```
+
+#### CrossSim Write Noise：it-8
+
+**噪声 std=1e-4**（`crosssim_conditions/caption_transformer_it-8_crosssim.pt`）：
+
+```text
+Device: cuda
+CrossSim scope: decoder_only
+CrossSim tile shape: (128, 128)
+CrossSim ADC/DAC: 0/0
+CrossSim GPU: True
+Batches evaluated: 100
+Baseline  loss: 2.534256, token_acc: 0.476609
+CrossSim  loss: 2.534066, token_acc: 0.477382
+Delta loss (crosssim - base): -0.000190
+Delta acc  (crosssim - base): 0.000773
+Logit MAE: 0.012248
+Logit Max Error: 0.448982
+Logit RMSE: 0.017217
+```
+
+#### CrossSim Write Noise：it-9
+
+**噪声 std=1e-5**（`crosssim_conditions/caption_transformer_it-9_crosssim.pt`）：
+
+```text
+Device: cuda
+CrossSim scope: decoder_only
+CrossSim tile shape: (128, 128)
+CrossSim ADC/DAC: 0/0
+CrossSim GPU: True
+Batches evaluated: 100
+Baseline  loss: 2.534256, token_acc: 0.476609
+CrossSim  loss: 2.534284, token_acc: 0.476277
+Delta loss (crosssim - base): 0.000028
+Delta acc  (crosssim - base): -0.000331
+Logit MAE: 0.001997
+Logit Max Error: 0.066716
+Logit RMSE: 0.002727
+```
+
+#### CrossSim Write Noise：it-10
+
+**噪声 std=1e-6**（`crosssim_conditions/caption_transformer_it-10_crosssim.pt`）：
+
+```text
+Device: cuda
+CrossSim scope: decoder_only
+CrossSim tile shape: (128, 128)
+CrossSim ADC/DAC: 0/0
+CrossSim GPU: True
+Batches evaluated: 100
+Baseline  loss: 2.534256, token_acc: 0.476609
+CrossSim  loss: 2.534277, token_acc: 0.476443
+Delta loss (crosssim - base): 0.000022
+Delta acc  (crosssim - base): -0.000166
+Logit MAE: 0.001048
+Logit Max Error: 0.046411
+Logit RMSE: 0.001462
+```
+
+#### Write Noise 退化曲线（最终汇总）
+
+| 条件 | 噪声 std | Loss | Token Acc | Δ Acc | Logit MAE | Logit Max Error |
+| --- | --- | --- | --- | --- | --- | --- |
+| 无噪声 | 0 | 2.534 | 47.7% | — | ~0 | ~0 |
+| it-10 | 1e-6 | 2.534 | 47.6% | -0.02pp | 0.001 | 0.05 |
+| it-9 | 1e-5 | 2.534 | 47.6% | -0.03pp | 0.002 | 0.07 |
+| it-8 | 1e-4 | 2.534 | 47.7% | +0.08pp | 0.012 | 0.45 |
+| it-7 | 1e-3 | 3.308 | 39.3% | -8.4pp | 1.064 | 13.41 |
+| it-6 | 1e-2 | 5.825 | 22.5% | -25.2pp | 1.991 | 21.49 |
+
+**分析**：
+
+- **安全区（it-10 ~ it-8）**：噪声 1e-6 ~ 1e-4，MAE ≤ 0.012，loss/acc 与基线无差异
+- **退化临界点**：1e-4 → 1e-3，MAE 跳升 ~90×（0.012 → 1.06）
+- **严重退化区（it-7 ~ it-6）**：噪声 1e-3 ~ 1e-2，MAE 1.0~2.0
+- **it-8（1e-4）为推荐写入精度**：兼顾硬件可编程性与模型保真度
+
+#### pycocoevalcap 全指标评估（limit=500）
+
+| 条件 | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.855 | 0.168 |
+| baseline-crosssim | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.855 | 0.168 |
+| **it-10 (1e-6)** | 0.6823 | 0.2472 | 0.2280 | 0.4962 | 0.856 | 0.168 |
+| **it-9 (1e-5)** | 0.6823 | 0.2466 | 0.2278 | 0.4955 | 0.855 | 0.168 |
+| **it-8 (1e-4)** | 0.6805 | **0.2502** | 0.2286 | 0.4970 | 0.857 | 0.168 |
+| it-7 (1e-3) | 0.4647 | 0.0913 | 0.1171 | 0.3475 | 0.180 | 0.045 |
+| it-6 (1e-2) | 0.1561 | **0.0000** | 0.0581 | 0.1993 | 0.008 | 0.001 |
+
+> it-6 BLEU-4=0 原因：模型输出序列长度暴涨（testlen=10435 vs reflen=5983, ratio=1.74），大量生成无效 token。
+> baseline-crosssim 与 baseline 完全一致，确认 CrossSim 零噪声映射无损。
+
+**核心结论**：
+
+- **it-8（1e-4）为最佳写入精度**：所有指标与基线持平甚至略优
+- **安全区（it-10 ~ it-8）无需任何容错设计**
+- **it-7（1e-3）为退化起点**：BLEU-4 从 0.25 暴跌至 0.09，METEOR 减半
+- **it-6（1e-2）模型功能崩溃**：BLEU-4=0，SPICE≈0
+
+### CrossSim ADC 分辨率消融
+
+**数据来源**：`checkpoints/crosssim_adc_conditions/metrics_pycoco.json`
+
+| 条件 | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| baseline-crosssim | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| **adc-12** | 0.6770 | **0.2468** | 0.2282 | 0.4953 | 0.8552 | 0.1680 |
+| **adc-10** | 0.6638 | 0.2396 | 0.2238 | 0.4893 | 0.8284 | 0.1649 |
+| adc-8 | 0.6310 | 0.2166 | 0.2204 | 0.4785 | 0.7429 | 0.1561 |
+| adc-6 | 0.2845 | 0.0265 | 0.1167 | 0.2785 | 0.0612 | 0.0659 |
+| adc-4 | 0.0617 | ~0 | 0.0131 | 0.0951 | ~0 | 0.0 |
+
+**分析**：
+
+- **adc-12 几乎无损**：所有指标与 baseline 在统计噪声范围内一致
+- **adc-10 轻微退化**：CIDEr 下降 ~3%（0.855→0.828），BLEU-4 下降 ~3%，属可接受范围
+- **adc-8 明显退化**：CIDEr 下降 ~13%（0.855→0.743），各指标开始明显下滑
+- **adc-6 严重退化**：BLEU-4 从 0.246 降至 0.027，模型基本失效
+- **adc-4 功能崩溃**：BLEU-4 ≈ 0，SPICE = 0，CIDEr ≈ 0
+
+**推荐 ADC ≥ 10-bit**：adc-10 退化 ~3% 可控；adc-8 退化 ~13% 需配合高写入精度。
+
+### CrossSim DAC 分辨率消融
+
+**数据来源**：`checkpoints/crosssim_dac_conditions/metrics_pycoco.json`
+
+| 条件 | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| baseline-crosssim | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| dac-12 | 0.5860 | 0.1637 | 0.1772 | 0.4349 | 0.5397 | 0.1242 |
+| dac-10 | 0.5787 | 0.1602 | 0.1747 | 0.4336 | 0.5373 | 0.1236 |
+| dac-8 | 0.5759 | 0.1583 | 0.1749 | 0.4338 | 0.5380 | 0.1224 |
+| dac-6 | 0.5425 | 0.1456 | 0.1673 | 0.4255 | 0.5144 | 0.1187 |
+| dac-4 | 0.2013 | 0.0411 | 0.0634 | 0.2537 | 0.1639 | 0.0571 |
+
+**分析**：
+
+- **DAC 整体影响远大于 ADC**：即使 dac-12 也使 BLEU-4 从 0.246 降至 0.164（-33%），而 adc-12 几乎无损
+- **dac-12 ~ dac-8 呈平台区**：BLEU-4 ~0.16, CIDEr ~0.54，三者差异极小，说明此区间 DAC 精度提升收益递减
+- **dac-6 略差于 dac-8**：CIDEr 再降 ~4%，但仍在同一量级
+- **dac-4 严重崩溃**：BLEU-4 降至 0.041（-83%），SPICE 降至 0.057
+- DAC 对性能的影响比 ADC 更关键：DAC 负责将模拟计算结果转回数字域供下一层使用，量化误差直接注入信号通路
+
+**推荐 DAC ≥ 6-bit**：dac-8/10/12 几乎等价，不必追求高位；dac-4 不可用。
+
+### CrossSim Read Noise 消融
+
+**数据来源**：`checkpoints/crosssim_read_noise_conditions/metrics_pycoco.json`
+
+| 条件 | read_noise_std | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline | — | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| read-noise-0 | 0 | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| read-noise-1e-5 | 1e-5 | 0.6818 | 0.2464 | 0.2276 | 0.4954 | 0.8548 | 0.1681 |
+| read-noise-1e-4 | 1e-4 | 0.6818 | 0.2464 | 0.2276 | 0.4954 | 0.8548 | 0.1681 |
+| read-noise-1e-3 | 1e-3 | 0.6839 | **0.2506** | 0.2286 | 0.4964 | 0.8597 | 0.1687 |
+| read-noise-1e-2 | 1e-2 | 0.6821 | **0.2505** | 0.2277 | 0.4972 | 0.8555 | 0.1663 |
+
+**分析**：
+
+- **Read noise 几乎无影响**：所有 read noise 条件（含 1e-2）的指标与 baseline 在统计噪声范围内一致
+- **与 write noise 形成强烈对比**：write noise 在 1e-2 时模型完全崩溃（BLEU-4=0），而 read noise 在 1e-2 时 BLEU-4=0.2505 甚至略优于基线
+- **1e-3 处有微弱正效应**：BLEU-4 0.2506 vs baseline 0.2464（+1.7%），CIDEr 0.8597 vs 0.8546，可能与 read noise 引入的微小扰动起到隐式正则化有关
+- 物理直觉吻合：read noise 仅影响读取过程的瞬时值，不改变存储权重，多次读取可平均化；write noise 永久腐蚀权重，误差逐层累积
+
+**结论**：Read noise 对 Transformer 图像描述模型基本无害，无需特殊容错设计。主要噪声威胁来自 write noise 和 DAC 量化。
+
+### CrossSim Array Size 消融
+
+**数据来源**：`checkpoints/crosssim_array_size_conditions/metrics_pycoco.json`
+
+| 条件 | tile_shape | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline | — | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| array-64×64 | 64×64 | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| array-128×128 | 128×128 | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| array-256×256 | 256×256 | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| array-512×512 | 512×512 | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+
+**分析**：
+
+- **Array size 64×64 ~ 512×512 全部与 baseline 完全一致**：在所有理想器件条件下，切 tile 后的矩阵-向量乘积在数学上等价，array size 不影响模型精度
+- 该结果同时验证了 CrossSim 的 tile 切分/重组机制正确，无实现层面的误差
+- Array size 的实际意义在于**与非理想效应的交互**：更小的 tile 意味着更多的 tile 边界、更多的 ADC/DAC 调用、更多的写噪声注入点。单独的 array size sweep 不足以暴露问题，需与 write noise + ADC/DAC 条件联合测试才能体现差异
 
 ---
 
-## 后续计划（CrossSim 迁移完成后）
+## 下一步计划
 
-- [ ] 运行 it-10 ~ it-6 写入噪声实验并记录指标
-- [ ] 分析 attention 与 FFN 对不同噪声水平的敏感度
-- [ ] 确定 it-8 是否为 Transformer 架构下的最佳折中点
+1. [x] **DAC bit sweep** — 已完成（dac-12 ~ dac-4），DAC 影响远大于 ADC，推荐 ≥ 6-bit
+1. [x] **Read noise sweep** — 已完成（std 0 ~ 1e-2），read noise 几乎无影响
+1. [x] **Array size sweep** — 已完成（64×64 ~ 512×512），理想条件下无差异，需与非理想效应联合测试
+1. **Module-wise sensitivity analysis** — 改变忆阻器交叉阵列规模（如 64×64 / 128×128 / 256×256 / 512×512），观察 array size 对模型保真度的影响
+1. **Module-wise sensitivity analysis** — 分别对 attention 投影层（Q/K/V/O）和 FFN 层（FFN1/FFN2）施加噪声，定位对噪声最敏感的模块
+1. **CMM-style mapping / CMM prototype** — 构建贴近 CMM 实际器件的映射参数集（非理想 Ron/Roff 分布、stuck-at-fault、IR drop 等），模拟真实 CMM 芯片行为
