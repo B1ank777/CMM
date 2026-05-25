@@ -82,9 +82,9 @@ LSTM-CMM 已在先前工作中被验证为一种可行的架构，但 Transforme
 | Dataset | MS COCO Captions 2014 |
 | Metrics | BLEU-1~4, METEOR, ROUGE |
 
-### 阶段二：CMM 误差注入仿真（CrossSim）✅
+### 阶段二：CMM 误差注入仿真 ✅
 
-使用 CrossSim 将 `nn.Linear` 层替换为 VTEAM 忆阻器交叉阵列等效模型，模拟 CMM 非理想特性：
+使用 CrossSim（VTEAM 物理模型）和 CMMLinear（论文式 r-state 模型）将 `nn.Linear` 层替换为忆阻器交叉阵列等效模型，模拟 CMM 非理想特性：
 
 ```text
 W_real → W_mapped → W_written = W_real + write_noise
@@ -107,6 +107,14 @@ W_real → W_mapped → W_written = W_real + write_noise
 | DAC 分辨率 | 12 bit | 4 ~ 12 bit |
 | 阵列规模 (tile_rows × tile_cols) | 128×128 | 64×64 ~ 512×512 |
 
+**CMM 消融实验维度**（CMMLinear 论文式模型）：
+
+| 实验维度 | 默认值 | 扫描范围 |
+|----------|--------|----------|
+| cell_bits 量化 | 0 (连续) | 2 ~ 8 bit, continuous |
+| 写入噪声 (write_noise_std) | 0 | 0 ~ 1e-2 (3 seeds) |
+| 读噪声 (read_noise_std) | 0 | 0 ~ 1e-2 (3 seeds) |
+
 ### 阶段三：硬件架构设计
 
 将完整的 Transformer decoder block 映射为 CMM tile 结构，评估：
@@ -128,7 +136,10 @@ W_real → W_mapped → W_written = W_real + write_noise
 | **CMM-it8** | 写入噪声 std = 1e-4 + 中等非理想 ADC/DAC（参考折中点） |
 | **CMM-it7** | 写入噪声 std = 1e-3 + 中等非理想 ADC/DAC |
 | **CMM-it6** | 写入噪声 std = 1e-2 + 中等非理想 ADC/DAC |
-| **ADC/DAC 消融** | 不同 ADC (4~12 bit)、DAC (4~12 bit) 组合 |
+| **CMM 对照** | CMMLinear 论文式映射（rmin/rmax/cell_bits/write_noise/read_noise） |
+| **CMM cell_bits 消融** | 不同 cell_bits (2-bit ~ continuous) |
+| **CMM 写入噪声消融** | 不同 write_noise_std (0 ~ 1e-2, 3 seeds) |
+| **CMM 读噪声消融** | 不同 read_noise_std (0 ~ 1e-2, 3 seeds) |
 | **读噪声消融** | 不同 read_noise_std (0 ~ 1e-2) |
 | **阵列规模消融** | tile 64×64 / 128×128 / 256×256 / 512×512 |
 
@@ -163,15 +174,21 @@ CMM/
 │   ├── train_captioner.py                  # 训练入口脚本
 │   ├── preprocess.py                       # 预处理验证脚本
 │   ├── map_crosssim.py                     # CrossSim 忆阻器交叉阵列映射
-│   ├── evaluate_crosssim.py                # CrossSim 条件模型批量评估
+│   ├── map_cmm.py                          # CMM 论文式忆阻器模型映射
+│   ├── cmm.py                              # CMMLinear 等效线性层实现
+│   ├── evaluate_crosssim.py                # 条件模型批量评估
 │   ├── generate_caption.py                 # 单张图片描述生成
 │   ├── compute_metrics_pycoco.py           # BLEU/METEOR/ROUGE 指标计算
 │   ├── check_crosssim_linear_equivalence.py # CrossSim AnalogLinear 等价性验证
+│   ├── check_cmm_linear_equivalence.py     # CMM CMMLinear 等价性验证
 │   ├── test_crosssim_write_noise_conditions.py   # 写入噪声消融实验
 │   ├── test_crosssim_read_noise_conditions.py    # 读噪声消融实验
 │   ├── test_crosssim_adc_conditions.py           # ADC 分辨率消融实验
 │   ├── test_crosssim_dac_conditions.py           # DAC 分辨率消融实验
 │   ├── test_crosssim_array_size_conditions.py    # 阵列规模消融实验
+│   ├── test_cmm_cell_bits_conditions.py           # CMM cell_bits 量化消融
+│   ├── test_cmm_write_noise_conditions.py         # CMM 写入噪声消融
+│   ├── test_cmm_read_noise_conditions.py          # CMM 读噪声消融
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── encoder.py                      # ResNet-50 图像编码器
@@ -345,6 +362,22 @@ python -m src.test_crosssim_array_size_conditions \
     --output-dir checkpoints/crosssim_array_size_conditions
 ```
 
+### CMM 消融实验
+
+```bash
+# cell_bits 量化消融（2-bit ~ continuous）
+python -m src.test_cmm_cell_bits_conditions     --checkpoint checkpoints/caption_transformer_epoch_10.pt     --output-dir checkpoints/cmm_cell_bits_conditions
+
+# 写入噪声消融（0 ~ 1e-2, 3 seeds）
+python -m src.test_cmm_write_noise_conditions     --checkpoint checkpoints/caption_transformer_epoch_10.pt     --output-dir checkpoints/cmm_write_noise_conditions
+
+# 读噪声消融（0 ~ 1e-2, 3 seeds）
+python -m src.test_cmm_read_noise_conditions     --checkpoint checkpoints/caption_transformer_epoch_10.pt     --output-dir checkpoints/cmm_read_noise_conditions
+
+# 批量评估 CMM 条件模型
+python -m src.compute_metrics_pycoco     --baseline-checkpoint checkpoints/caption_transformer_epoch_10.pt     --conditions-manifest checkpoints/cmm_write_noise_conditions/conditions_manifest.json     --limit 500
+```
+
 ### 模型评估
 
 ```bash
@@ -379,6 +412,43 @@ python -m src.generate_caption \
 python -m src.check_crosssim_linear_equivalence
 ```
 
+### CMM 映射（论文式忆阻器模型）
+
+CrossSim 的 `AnalogLinear` 依赖底层 VTEAM 器件模型，参数配置复杂。`CMMLinear` 是论文风格的等效模型，直接维护内部状态 `r_pos`/`r_neg`，行为更可控：
+
+```bash
+# 默认映射（decoder_only，无噪声）
+python -m src.map_cmm --checkpoint checkpoints/caption_transformer_epoch_10.pt
+
+# 添加写入和读噪声
+python -m src.map_cmm --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --write-noise-std 0.001 --read-noise-std 0.0001 \
+    --output checkpoints/caption_transformer_cmm_it7.pt
+
+# 自定义 CMM 参数
+python -m src.map_cmm --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --rmin 500 --rmax 5e4 --cell-bits 8 --tile-rows 64 --tile-cols 64
+
+# CMM 等价性验证
+python -m src.check_cmm_linear_equivalence
+```
+
+### CMM 映射参数速查
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--checkpoint` | Path | 必填 | 训练检查点路径 |
+| `--output` | Path | `checkpoints/caption_transformer_cmm.pt` | 输出路径 |
+| `--device` | str | `cuda`（可用时）/ `cpu` | 映射设备 |
+| `--scope` | str | `decoder_only` | 映射范围：`output_only` / `layers_only` / `decoder_only` |
+| `--tile-rows` | int | 128 | CMM 阵列最大行数 |
+| `--tile-cols` | int | 128 | CMM 阵列最大列数 |
+| `--rmin` | float | 1e3 | Ron，器件最小电阻 (Ω) |
+| `--rmax` | float | 1e5 | Roff，器件最大电阻 (Ω) |
+| `--cell-bits` | int | 0 | 单元状态量化 bit 数；0 表示连续状态 |
+| `--write-noise-std` | float | 0.0 | 写入噪声强度，作用在内部状态 r 上 |
+| `--read-noise-std` | float | 0.0 | 读噪声强度，作用在推理时 Rmem 上 |
+
 ## 10. 开发路线图
 
 - [x] ResNet 图像编码器
@@ -397,4 +467,6 @@ python -m src.check_crosssim_linear_equivalence
 - [ ] VGG-16 编码器支持
 - [ ] Mem32 对照实验
 - [ ] 硬件性能建模（延迟/能耗/面积）
-- [ ] CMM tile 结构映射设计（阶段三）
+- [x] CMM 论文式映射（`map_cmm.py` + `CMMLinear`）
+- [ ] CMM 写入噪声消融实验（it-10 ~ it-6）
+- [ ] CMM 非理想特性联调（write noise + read noise + ADC/DAC + array size）

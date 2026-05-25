@@ -24,6 +24,7 @@ from .map_crosssim import (
     build_model_from_payload,
     synchronize_crosssim_cores,
 )
+from .map_cmm import build_model_from_cmm_payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,7 +90,7 @@ def main() -> None:
     # 恢复词表
     vocab = build_vocab_from_payload(payload)
 
-    # 恢复模型 —— 兼容标准训练检查点与 CrossSim 检查点。
+    # 恢复模型 —— 兼容标准训练检查点、CrossSim 检查点与 CMM 检查点。
     state_dict = payload.get("model_state_dict")
     if state_dict is not None:
         # 标准训练检查点：直接加载权重到 CaptionTransformer
@@ -106,10 +107,23 @@ def main() -> None:
         )
         model.load_state_dict(payload["crosssim_model_state_dict"])
         synchronize_crosssim_cores(model)
+    elif payload.get("format") == "cmm_v1" or "cmm_model_state_dict" in payload:
+        # CMM 检查点：先重建 CMMLinear 结构，再加载 r_pos/r_neg 等器件状态。
+        if "cmm_model_state_dict" not in payload:
+            raise ValueError("CMM checkpoint missing 'cmm_model_state_dict'.")
+        base_model = build_model_from_payload(payload)
+        base_model.to(device)
+        model = build_model_from_cmm_payload(
+            baseline_model=base_model,
+            cmm_args=payload.get("cmm_args", {}),
+            device=device,
+        )
+        model.load_state_dict(payload["cmm_model_state_dict"])
     else:
         raise ValueError(
             "Checkpoint payload missing both 'model_state_dict' (standard) "
-            "and 'crosssim_model_state_dict' (CrossSim-mapped)."
+            "'crosssim_model_state_dict' (CrossSim-mapped), and "
+            "'cmm_model_state_dict' (CMM-mapped)."
         )
 
     model.to(device)  # 将模型移至目标设备

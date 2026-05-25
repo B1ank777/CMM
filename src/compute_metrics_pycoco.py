@@ -4,7 +4,7 @@
 #   python -m src.compute_metrics_pycoco --baseline-checkpoint <基线检查点> --conditions-manifest <条件清单>
 #
 # 示例:
-#   python -m src.compute_metrics_pycoco --baseline-checkpoint checkpoints/best.pt --conditions-manifest manifest.json --limit 500
+#   python -m src.compute_metrics_pycoco --baseline-checkpoint checkpoints/caption_transformer_epoch_10.pt --conditions-manifest checkpoints/cmm_cell_bits_conditions/conditions_manifest.json --output checkpoints/cmm_cell_bits_conditions/metrics_pycoco.json --limit 500
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from .map_crosssim import (
     load_checkpoint,
     synchronize_crosssim_cores,
 )
+from .map_cmm import build_model_from_cmm_payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,13 +77,26 @@ def load_baseline_model(checkpoint: Path, device: torch.device):
 
 
 def load_crosssim_model(crosssim_checkpoint: Path, baseline_model, device: torch.device):
-    """加载 CrossSim 映射模型，使用 checkpoint 元数据重建 analog 层。"""
+    """加载 CrossSim 或 CMM 映射模型，使用 checkpoint 元数据重建结构。"""
     crosssim_payload = torch.load(crosssim_checkpoint, map_location="cpu")
+    is_cmm_checkpoint = crosssim_payload.get("format") == "cmm_v1" or "cmm_model_state_dict" in crosssim_payload
+    if is_cmm_checkpoint:
+        cmm_args = crosssim_payload.get("cmm_args")
+        if not cmm_args:
+            raise ValueError("CMM checkpoint missing 'cmm_args'.")
+        if "cmm_model_state_dict" not in crosssim_payload:
+            raise ValueError("CMM checkpoint missing 'cmm_model_state_dict'.")
+        cmm_model = build_model_from_cmm_payload(baseline_model, cmm_args, device)
+        cmm_model.load_state_dict(crosssim_payload["cmm_model_state_dict"])
+        cmm_model.to(device)
+        cmm_model.eval()
+        return cmm_model, crosssim_payload
+
     crosssim_args = crosssim_payload.get("crosssim_args")
     if not crosssim_args:
-        raise ValueError("CrossSim checkpoint missing 'crosssim_args'.")
+        raise ValueError("Checkpoint missing 'crosssim_args' or 'cmm_args'.")
     if "crosssim_model_state_dict" not in crosssim_payload:
-        raise ValueError("CrossSim checkpoint missing 'crosssim_model_state_dict'.")
+        raise ValueError("Checkpoint missing 'crosssim_model_state_dict' or 'cmm_model_state_dict'.")
 
     crosssim_model = build_model_from_crosssim_payload(baseline_model, crosssim_args, device)
     crosssim_model.load_state_dict(crosssim_payload["crosssim_model_state_dict"])
@@ -91,6 +105,14 @@ def load_crosssim_model(crosssim_checkpoint: Path, baseline_model, device: torch
     crosssim_model.to(device)
     crosssim_model.eval()
     return crosssim_model, crosssim_payload
+
+
+def set_eval_seed(seed_value: Any) -> None:
+    """按 manifest 中的 seed 固定评估随机性，覆盖 CMM 读噪声等 forward 随机项。"""
+    seed = int(seed_value)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def generate_caption(model, image_tensor, vocab, device, max_len):
@@ -180,6 +202,8 @@ def main() -> None:
         ckpt = Path(item["checkpoint"])
         cond = item["condition"]
 
+        if "seed" in item:
+            set_eval_seed(item["seed"])
         crosssim_model, _ = load_crosssim_model(ckpt, base_model, device)
         pred_file = output_dir / f"{cond}_predictions.json"
         build_predictions_json(crosssim_model, vocab, args.coco_root, image_ids, pred_file, device, args.max_len)

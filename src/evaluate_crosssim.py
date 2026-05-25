@@ -26,6 +26,7 @@ from .map_crosssim import (
     load_checkpoint,
     synchronize_crosssim_cores,
 )
+from .map_cmm import build_model_from_cmm_payload
 
 # 运行示例：
 #   # 评估 CrossSim 映射模型 vs 数字基线（默认 100 batch）
@@ -212,17 +213,31 @@ def load_baseline_model(checkpoint: Path, device: torch.device):
 
 
 def load_crosssim_model(crosssim_checkpoint: Path, baseline_model: nn.Module, device: torch.device):
-    """加载 CrossSim checkpoint，并在 load_state_dict 后同步内部阵列。
+    """加载 CrossSim 或 CMM checkpoint，并返回可推理模型。
 
     CrossSim 模型内部维护了与 weight 分离的器件电导状态，
     load_state_dict 后必须调用 synchronize 将电导写回到模拟阵列中。
+    CMM checkpoint 直接保存 r_pos/r_neg 等器件状态 buffer，无需额外同步。
     """
     crosssim_payload = torch.load(crosssim_checkpoint, map_location="cpu")
+    is_cmm_checkpoint = crosssim_payload.get("format") == "cmm_v1" or "cmm_model_state_dict" in crosssim_payload
+    if is_cmm_checkpoint:
+        cmm_args = crosssim_payload.get("cmm_args")
+        if not cmm_args:
+            raise ValueError("CMM checkpoint missing 'cmm_args'.")
+        if "cmm_model_state_dict" not in crosssim_payload:
+            raise ValueError("CMM checkpoint missing 'cmm_model_state_dict'.")
+        cmm_model = build_model_from_cmm_payload(baseline_model, cmm_args, device)
+        cmm_model.load_state_dict(crosssim_payload["cmm_model_state_dict"])
+        cmm_model.to(device)
+        cmm_model.eval()
+        return cmm_model, crosssim_payload
+
     crosssim_args = crosssim_payload.get("crosssim_args")
     if not crosssim_args:
-        raise ValueError("CrossSim checkpoint missing 'crosssim_args'.")
+        raise ValueError("Checkpoint missing 'crosssim_args' or 'cmm_args'.")
     if "crosssim_model_state_dict" not in crosssim_payload:
-        raise ValueError("CrossSim checkpoint missing 'crosssim_model_state_dict'.")
+        raise ValueError("Checkpoint missing 'crosssim_model_state_dict' or 'cmm_model_state_dict'.")
 
     # 以基线模型结构为模板，构建 CrossSim 版本的模型
     crosssim_model = build_model_from_crosssim_payload(baseline_model, crosssim_args, device)
@@ -274,17 +289,28 @@ def main() -> None:
     # 打印评估结果汇总
     print("=== Evaluation Summary ===")
     print(f"Device: {device}")
-    crosssim_args = crosssim_payload.get("crosssim_args", {})
-    # 打印 checkpoint 中实际记录的映射参数，避免评估时误判实验条件
-    print(f"CrossSim scope: {crosssim_args.get('mapping_scope', 'decoder_only')}")
-    print(f"CrossSim tile shape: {tuple(crosssim_args.get('tile_shape', (128, 128)))}")
-    print(f"CrossSim ADC/DAC: {crosssim_args.get('adc_resolution', 0)}/{crosssim_args.get('dac_resolution', 0)}")
-    print(f"CrossSim GPU: {crosssim_args.get('use_gpu', False)}")
+    # 打印 checkpoint 中实际记录的映射参数，避免评估时误判实验条件。
+    if crosssim_payload.get("format") == "cmm_v1" or "cmm_args" in crosssim_payload:
+        cmm_args = crosssim_payload.get("cmm_args", {})
+        mapped_name = "CMM"
+        print(f"CMM format: {crosssim_payload.get('format', 'legacy-cmm')}")
+        print(f"CMMLinear layers: {crosssim_payload.get('num_cmm_linear', 'unknown')}")
+        print(f"CMM scope: {cmm_args.get('mapping_scope', 'decoder_only')}")
+        print(f"CMM tile shape: {tuple(cmm_args.get('tile_shape', (128, 128)))}")
+        print(f"CMM Rmin/Rmax: {cmm_args.get('rmin', 1e3)}/{cmm_args.get('rmax', 1e5)}")
+        print(f"CMM write/read noise std: {cmm_args.get('write_noise_std', 0.0)}/{cmm_args.get('read_noise_std', 0.0)}")
+    else:
+        crosssim_args = crosssim_payload.get("crosssim_args", {})
+        mapped_name = "CrossSim"
+        print(f"CrossSim scope: {crosssim_args.get('mapping_scope', 'decoder_only')}")
+        print(f"CrossSim tile shape: {tuple(crosssim_args.get('tile_shape', (128, 128)))}")
+        print(f"CrossSim ADC/DAC: {crosssim_args.get('adc_resolution', 0)}/{crosssim_args.get('dac_resolution', 0)}")
+        print(f"CrossSim GPU: {crosssim_args.get('use_gpu', False)}")
     print(f"Batches evaluated: {args.max_batches}")
     print(f"Baseline  loss: {base_loss:.6f}, token_acc: {base_acc:.6f}")
-    print(f"CrossSim  loss: {crosssim_loss:.6f}, token_acc: {crosssim_acc:.6f}")
-    print(f"Delta loss (crosssim - base): {crosssim_loss - base_loss:.6f}")
-    print(f"Delta acc  (crosssim - base): {crosssim_acc - base_acc:.6f}")
+    print(f"{mapped_name}  loss: {crosssim_loss:.6f}, token_acc: {crosssim_acc:.6f}")
+    print(f"Delta loss ({mapped_name.lower()} - base): {crosssim_loss - base_loss:.6f}")
+    print(f"Delta acc  ({mapped_name.lower()} - base): {crosssim_acc - base_acc:.6f}")
     print(f"Logit MAE: {logit_mae:.6f}")
     print(f"Logit Max Error: {logit_max_error:.6f}")
     print(f"Logit RMSE: {logit_rmse:.6f}")
