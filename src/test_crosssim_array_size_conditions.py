@@ -6,6 +6,26 @@
 如需验证纯理想 tile 等价性，请显式传入 --adc-resolution 0 --dac-resolution 0。
 """
 
+# 运行示例（Windows，使用 ^ 续行）：
+#   :: 默认方阵尺寸扫描（64, 128, 256, 512），中等非理想 ADC/DAC
+#   python -m src.test_crosssim_array_size_conditions --checkpoint checkpoints\caption_transformer_epoch_10.pt ^
+#       --output-dir checkpoints\crosssim_array_size_conditions
+#
+#   :: 自定义方阵尺寸，跳过已存在的文件
+#   python -m src.test_crosssim_array_size_conditions --checkpoint checkpoints\caption_transformer_epoch_10.pt ^
+#       --output-dir checkpoints\crosssim_array_size_conditions ^
+#       --array-sizes 32,64,128 --skip-existing
+#
+#   :: 矩形阵列尺寸，GPU 加速
+#   python -m src.test_crosssim_array_size_conditions --checkpoint checkpoints\caption_transformer_epoch_10.pt ^
+#       --output-dir checkpoints\crosssim_array_rect ^
+#       --device cuda --use-gpu --rect-array-sizes 64x128,128x256,256x512
+#
+#   :: 理想 ADC/DAC，仅验证 tile 分块本身的影响
+#   python -m src.test_crosssim_array_size_conditions --checkpoint checkpoints\caption_transformer_epoch_10.pt ^
+#       --output-dir checkpoints\crosssim_array_ideal ^
+#       --adc-resolution 0 --dac-resolution 0 --array-sizes 32,64,128,256,512
+
 from __future__ import annotations
 
 import argparse
