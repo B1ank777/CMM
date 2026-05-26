@@ -215,7 +215,7 @@ def load_baseline_model(checkpoint: Path, device: torch.device):
 def load_crosssim_model(crosssim_checkpoint: Path, baseline_model: nn.Module, device: torch.device):
     """加载 CrossSim 或 CMM checkpoint，并返回可推理模型。
 
-    CrossSim 模型内部维护了与 weight 分离的器件电导状态，
+    CrossSim/CMM-on-CrossSim 模型内部维护了与 weight 分离的器件电导状态，
     load_state_dict 后必须调用 synchronize 将电导写回到模拟阵列中。
     CMM checkpoint 直接保存 r_pos/r_neg 等器件状态 buffer，无需额外同步。
     """
@@ -290,7 +290,25 @@ def main() -> None:
     print("=== Evaluation Summary ===")
     print(f"Device: {device}")
     # 打印 checkpoint 中实际记录的映射参数，避免评估时误判实验条件。
-    if crosssim_payload.get("format") == "cmm_v1" or "cmm_args" in crosssim_payload:
+    if crosssim_payload.get("format") == "cmm_crosssim_v1":
+        cmm_crosssim_args = crosssim_payload.get("cmm_crosssim_args", {})
+        mapped_name = "CMM-CrossSim"
+        print(f"CMM-CrossSim format: {crosssim_payload.get('format')}")
+        print(f"CMM-CrossSim mapped linear layers: {crosssim_payload.get('num_mapped_linear', 'unknown')}")
+        print(f"CMM-CrossSim scope: {cmm_crosssim_args.get('mapping_scope', 'decoder_only')}")
+        print(f"CMM-CrossSim tile shape: {tuple(cmm_crosssim_args.get('tile_shape', (128, 128)))}")
+        print(f"CMM-CrossSim Rmin/Rmax: {cmm_crosssim_args.get('rmin', 1e3)}/{cmm_crosssim_args.get('rmax', 1e5)}")
+        print(f"CMM-CrossSim cell bits: {cmm_crosssim_args.get('cell_bits', 0)}")
+        print(
+            "CMM-CrossSim write/read noise std: "
+            f"{cmm_crosssim_args.get('write_noise_std', 0.0)}/{cmm_crosssim_args.get('read_noise_std', 0.0)}"
+        )
+        print(
+            "CMM-CrossSim ADC/DAC: "
+            f"{cmm_crosssim_args.get('adc_resolution', 0)}/{cmm_crosssim_args.get('dac_resolution', 0)}"
+        )
+        print(f"CMM-CrossSim GPU: {cmm_crosssim_args.get('use_gpu', False)}")
+    elif crosssim_payload.get("format") == "cmm_v1" or "cmm_args" in crosssim_payload:
         cmm_args = crosssim_payload.get("cmm_args", {})
         mapped_name = "CMM"
         print(f"CMM format: {crosssim_payload.get('format', 'legacy-cmm')}")
@@ -299,6 +317,7 @@ def main() -> None:
         print(f"CMM tile shape: {tuple(cmm_args.get('tile_shape', (128, 128)))}")
         print(f"CMM Rmin/Rmax: {cmm_args.get('rmin', 1e3)}/{cmm_args.get('rmax', 1e5)}")
         print(f"CMM write/read noise std: {cmm_args.get('write_noise_std', 0.0)}/{cmm_args.get('read_noise_std', 0.0)}")
+        print(f"CMM ADC/DAC: {cmm_args.get('adc_resolution', 0)}/{cmm_args.get('dac_resolution', 0)}")
     else:
         crosssim_args = crosssim_payload.get("crosssim_args", {})
         mapped_name = "CrossSim"

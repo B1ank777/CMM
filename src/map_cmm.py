@@ -25,6 +25,11 @@ from .map_crosssim import (
 #       --write-noise-std 0.001 --read-noise-std 0.0001 \
 #       --output checkpoints/caption_transformer_cmm_it7.pt
 #
+#   # 添加 DAC/ADC 量化
+#   python -m src.map_cmm --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+#       --dac-resolution 8 --adc-resolution 10 \
+#       --output checkpoints/caption_transformer_cmm_adc10_dac8.pt
+#
 #   # 只映射 decoder layers，暂不映射 vocabulary projection
 #   python -m src.map_cmm --checkpoint checkpoints/caption_transformer_epoch_10.pt \
 #       --scope layers_only --output checkpoints/caption_transformer_cmm_layers.pt
@@ -53,13 +58,15 @@ def parse_args() -> argparse.Namespace:
         choices=["output_only", "layers_only", "decoder_only"],
         help="映射范围：output_only=仅 LM head；layers_only=仅 decoder 层；decoder_only=全部 decoder 线性层",
     )
-    parser.add_argument("--tile-rows", type=int, default=128, help="CMM 阵列最大行数，仅作为分块元数据保存")
-    parser.add_argument("--tile-cols", type=int, default=128, help="CMM 阵列最大列数，仅作为分块元数据保存")
+    parser.add_argument("--tile-rows", type=int, default=128, help="CMM 阵列最大行数，forward 会按该行数分块")
+    parser.add_argument("--tile-cols", type=int, default=128, help="CMM 阵列最大列数，forward 会按该列数分块")
     parser.add_argument("--rmin", type=float, default=1e3, help="Ron，器件最小电阻")
     parser.add_argument("--rmax", type=float, default=1e5, help="Roff，器件最大电阻")
     parser.add_argument("--cell-bits", type=int, default=0, help="单元状态量化 bit 数；0 表示连续状态")
     parser.add_argument("--write-noise-std", type=float, default=0.0, help="写入噪声强度，作用在内部状态 r 上")
     parser.add_argument("--read-noise-std", type=float, default=0.0, help="读噪声强度，作用在推理时 Rmem 上")
+    parser.add_argument("--adc-resolution", type=int, default=0, help="ADC 分辨率；0 表示理想 ADC")
+    parser.add_argument("--dac-resolution", type=int, default=0, help="DAC 分辨率；0 表示理想 DAC")
     return parser.parse_args()
 
 
@@ -72,6 +79,8 @@ def build_cmm_model(
     cell_bits: int = 0,
     write_noise_std: float = 0.0,
     read_noise_std: float = 0.0,
+    adc_resolution: int = 0,
+    dac_resolution: int = 0,
 ) -> nn.Module:
     """按 scope 将 CaptionTransformer 的线性层映射为 CMMLinear。"""
     if tile_shape[0] <= 0 or tile_shape[1] <= 0:
@@ -93,6 +102,8 @@ def build_cmm_model(
             read_noise_std=read_noise_std,
             tile_rows=tile_shape[0],
             tile_cols=tile_shape[1],
+            adc_resolution=adc_resolution,
+            dac_resolution=dac_resolution,
         )
     if scope in {"output_only", "decoder_only"}:
         cmm_model.output_proj = convert_module_to_cmm(
@@ -104,6 +115,8 @@ def build_cmm_model(
             read_noise_std=read_noise_std,
             tile_rows=tile_shape[0],
             tile_cols=tile_shape[1],
+            adc_resolution=adc_resolution,
+            dac_resolution=dac_resolution,
         )
     return cmm_model
 
@@ -118,6 +131,8 @@ def make_cmm_args(args: argparse.Namespace) -> Dict[str, Any]:
         "cell_bits": args.cell_bits,
         "write_noise_std": args.write_noise_std,
         "read_noise_std": args.read_noise_std,
+        "adc_resolution": getattr(args, "adc_resolution", 0),
+        "dac_resolution": getattr(args, "dac_resolution", 0),
     }
 
 
@@ -138,6 +153,8 @@ def build_model_from_cmm_payload(
         # checkpoint 已保存写入后的 r_pos/r_neg，加载结构时不再重新注入写入噪声
         write_noise_std=0.0,
         read_noise_std=float(cmm_args.get("read_noise_std", 0.0)),
+        adc_resolution=int(cmm_args.get("adc_resolution", 0)),
+        dac_resolution=int(cmm_args.get("dac_resolution", 0)),
     )
 
 
@@ -162,6 +179,7 @@ def main() -> None:
     print(f"Rmin/Rmax: {args.rmin}/{args.rmax}")
     print(f"Cell bits: {args.cell_bits}")
     print(f"Write/read noise std: {args.write_noise_std}/{args.read_noise_std}")
+    print(f"ADC/DAC resolution: {args.adc_resolution}/{args.dac_resolution}")
     print(f"Decoder linear layers to map: {linear_count}")
 
     # 执行 CMM 映射
@@ -174,6 +192,8 @@ def main() -> None:
         cell_bits=args.cell_bits,
         write_noise_std=args.write_noise_std,
         read_noise_std=args.read_noise_std,
+        adc_resolution=args.adc_resolution,
+        dac_resolution=args.dac_resolution,
     )
     cmm_model.to(device)
     cmm_model.eval()
