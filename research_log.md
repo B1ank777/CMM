@@ -424,6 +424,90 @@ Logit RMSE: 0.000001
 - 与 CrossSim ADC 消融对比：CMM cell_bits 量化影响介于 ADC-6（崩溃）与 ADC-8（明显退化）之间，但崩溃阈值更高（cell-2bit 才崩溃 vs ADC-4 崩溃）
 - PyTorch CMM 等效仿真管线（等价性 → decoder_only → caption 指标）全部验证通过，可以进入 CrossSim 接入阶段
 
+### CMM ADC 分辨率消融
+
+**数据来源**：`checkpoints/cmm_adc_conditions/metrics_pycoco.json`
+
+| 条件 | adc_resolution | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline | — | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| adc-ideal | 0 | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| **adc-12bit** | 12 | 0.6835 | 0.2497 | 0.2288 | 0.4968 | 0.8603 | 0.1691 |
+| **adc-10bit** | 10 | 0.6851 | 0.2521 | 0.2291 | 0.4980 | 0.8597 | 0.1679 |
+| **adc-8bit** | 8 | 0.6818 | 0.2491 | 0.2293 | 0.4978 | 0.8517 | 0.1671 |
+| adc-6bit | 6 | 0.6774 | 0.2463 | 0.2258 | 0.4955 | 0.8357 | 0.1655 |
+| adc-4bit | 4 | 0.6539 | 0.2201 | 0.2214 | 0.4756 | 0.7830 | 0.1608 |
+
+**分析**：
+
+- **adc-ideal 与 baseline 完全一致**：说明 CMM 的理想 ADC 路径无额外数值误差
+- **adc-12 / adc-10 / adc-8 均未出现退化**：BLEU-4 与 CIDEr 均与 baseline 持平甚至略优，说明在当前 CMM 仿真中，8-bit 以上 ADC 对 caption 质量几乎无影响
+- **adc-6 开始出现轻微退化**：CIDEr 从 0.8546 降至 0.8357（-2.2%），BLEU-4 基本持平，属于边缘可接受区间
+- **adc-4 明显退化**：BLEU-4 从 0.2464 降至 0.2201（-10.7%），CIDEr 从 0.8546 降至 0.7830（-8.4%），但仍未出现 CrossSim adc-4 那种完全崩溃
+- **CMM ADC 敏感性显著弱于 CrossSim**：CrossSim 在 adc-6 已严重退化、adc-4 基本崩溃；而 CMM 在 adc-6 仅轻微退化、adc-4 仍保持可用 caption 质量
+- 这说明当前 CMM 的 ADC 量化路径比 CrossSim/VTEAM 模型更平滑，误差传播更弱；后续需要在 CrossSim 接入阶段验证这是否来自 CMM 等效模型本身的“理想化”
+
+**核心结论**：
+
+- **推荐 CMM ADC ≥ 6-bit**：adc-6 退化约 2%，可接受；adc-8 及以上基本无损
+- **adc-4 为明显退化起点**，但远未达到 CrossSim 同级别崩溃程度
+- 当前 CMM 中，ADC 不是主要瓶颈；其影响弱于 `cell_bits`，也弱于 CrossSim 中 ADC 的影响
+
+### CMM DAC 分辨率消融
+
+**数据来源**：`checkpoints/cmm_dac_conditions/metrics_pycoco.json`
+
+| 条件 | dac_resolution | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline | — | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| dac-ideal | 0 | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| **dac-12bit** | 12 | 0.6815 | 0.2478 | 0.2278 | 0.4955 | 0.8557 | 0.1682 |
+| **dac-10bit** | 10 | 0.6835 | 0.2496 | 0.2287 | 0.4963 | 0.8605 | 0.1688 |
+| **dac-8bit** | 8 | 0.6811 | 0.2462 | 0.2275 | 0.4953 | 0.8523 | 0.1662 |
+| dac-6bit | 6 | 0.6740 | 0.2472 | 0.2275 | 0.4935 | 0.8536 | 0.1684 |
+| dac-4bit | 4 | 0.6702 | 0.2309 | 0.2232 | 0.4846 | 0.8107 | 0.1606 |
+
+**分析**：
+
+- **dac-ideal 与 baseline 完全一致**：说明 CMM 的理想 DAC 路径无额外数值误差
+- **dac-12 / dac-10 / dac-8 基本无损**：各项指标与 baseline 持平，甚至 dac-10 略优（CIDEr 0.8605 vs 0.8546），说明在当前 CMM 仿真中，8-bit 以上 DAC 对 caption 质量几乎无影响
+- **dac-6 仍保持稳定**：BLEU-4 0.2472 与 baseline 基本一致，CIDEr 0.8536 仅下降 0.1%，说明 CMM 对 DAC 量化同样不敏感
+- **dac-4 才开始明显退化**：BLEU-4 从 0.2464 降至 0.2309（-6.3%），CIDEr 从 0.8546 降至 0.8107（-5.1%），但仍远好于 CrossSim dac-4 的严重崩溃表现
+- **CMM DAC 敏感性远弱于 CrossSim**：CrossSim 在 dac-12 就已有明显性能损失，而 CMM 直到 dac-4 才出现可见下降，说明当前 CMM 等效模型中的 DAC 量化误差传播明显更弱
+- 这进一步说明：当前 PyTorch CMM 等效仿真整体更“温和”，其 ADC/DAC 非理想性尚未复现 CrossSim/VTEAM 那种真实硬件路径中的严重累积误差
+
+**核心结论**：
+
+- **推荐 CMM DAC ≥ 6-bit**：6-bit 及以上基本无损；8-bit/10-bit/12-bit 无需刻意区分
+- **dac-4 为明显退化起点**，但仍未达到 CrossSim 中 DAC 的灾难性退化程度
+- 当前 CMM 中，DAC 也不是主要瓶颈；其影响弱于 `cell_bits`，并且显著弱于 CrossSim 中 DAC 的影响
+
+### CMM Array Size 消融
+
+**数据来源**：`checkpoints/cmm_array_size_conditions/metrics_pycoco.json`
+
+| 条件 | array_size | BLEU-1 | BLEU-4 | METEOR | ROUGE-L | CIDEr | SPICE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline | — | 0.6816 | 0.2464 | 0.2276 | 0.4954 | 0.8546 | 0.1680 |
+| **tile-64x64** | 64×64 | 0.6831 | 0.2479 | 0.2282 | 0.4959 | 0.8524 | 0.1676 |
+| **tile-128x128** | 128×128 | 0.6818 | 0.2491 | 0.2293 | 0.4978 | 0.8517 | 0.1671 |
+| **tile-256x256** | 256×256 | 0.6805 | 0.2470 | 0.2284 | 0.4967 | 0.8543 | 0.1672 |
+| **tile-512x512** | 512×512 | 0.6812 | 0.2484 | 0.2293 | 0.4976 | 0.8544 | 0.1673 |
+
+**分析**：
+
+- **不同 tile size 下 caption 质量几乎不变**：四组条件的 BLEU-4 均在 0.2470 ~ 0.2491 之间，CIDEr 在 0.8517 ~ 0.8544 之间，与 baseline 的差异都非常小
+- **不存在单调退化趋势**：64×64、128×128、256×256、512×512 各指标有轻微波动，但没有随着阵列增大或减小而持续恶化，说明当前 CMM 等效模型对 tile 切分并不敏感
+- **128×128 与 512×512 略优但不具统计意义**：BLEU-4 分别为 0.2491、0.2484，较 baseline 略高，更像评估采样波动而非真实硬件收益
+- **与 CrossSim array size 结果一致**：在当前无写噪声、无读噪声、连续 cell state 的理想 CMM 设置下，阵列规模本身不会成为 caption 质量瓶颈
+- 这说明当前 PyTorch CMM 等效仿真里，tile 仅影响实现切分方式，不会像真实 crossbar 那样引入额外的阵列级非理想效应；后续仍需要在 CrossSim/真实器件模型下验证大阵列是否会带来 IR drop、失配累积等问题
+
+**核心结论**：
+
+- **当前 CMM 中 array size 不是精度瓶颈**：64×64 ~ 512×512 全范围基本无损
+- **默认 128×128 配置可以继续沿用**，没有证据表明需要为了 caption 指标刻意缩小或放大 tile
+- 若后续要研究阵列规模影响，重点应转向 **array size × 非理想因素联动**，而不是仅做理想 tile 切分
+
 ### CMM Write Noise 消融（多种子）
 
 **数据来源**：`checkpoints/cmm_write_noise_conditions/metrics_mean_std.json` + `metrics_pycoco.json`（n=3 seeds: 1, 2, 3）
@@ -478,20 +562,34 @@ Logit RMSE: 0.000001
 
 ### CMM 消融实验汇总
 
-**已完成**：cell_bits 量化、write noise（多种子）、read noise（多种子）三项 PyTorch CMM 消融。
+**已完成**：cell_bits 量化、ADC 分辨率、DAC 分辨率、array size、write noise（多种子）、read noise（多种子）六项 PyTorch CMM 消融。
 
 | 消融项 | 变量范围 | 安全阈值 | 崩溃阈值 | 与 CrossSim 对比 |
 | --- | --- | --- | --- | --- |
 | cell_bits 量化 | 2-bit ~ continuous | ≥ 6-bit（CIDEr -2%） | 2-bit 崩溃 | 介于 ADC-6 与 ADC-8 之间，崩溃阈值更高 |
+| ADC 分辨率 | 4-bit ~ ideal | ≥ 6-bit（adc-6 仅轻微退化） | 未见崩溃 | **显著弱于 CrossSim**：adc-4 仍可用 |
+| DAC 分辨率 | 4-bit ~ ideal | ≥ 6-bit（dac-6 基本无损） | 未见崩溃 | **显著弱于 CrossSim**：dac-4 才明显下降 |
+| Array size | 64×64 ~ 512×512 | 全范围无害 | 无 | 与 CrossSim 一致：理想条件下阵列切分不敏感 |
 | Write noise | 0 ~ 1e-2（3 seeds） | ≤ 3e-3（BLEU-4 +0.9%） | 未见崩溃 | **远弱于 CrossSim**：CMM 1e-2 BLEU-4 -2.2% vs CrossSim 完全崩溃 |
 | Read noise | 0 ~ 1e-2（3 seeds） | 全量程无害 | 无 | 与 CrossSim 一致：read noise 完全无害 |
 
 **跨噪声类型对比（CMM 内部）**：
 
-- **威胁排序**：cell_bits >> write noise >> read noise
-- cell_bits 是 CMM 当前最严苛的精度瓶颈：4-bit 已造成 CIDEr -6%，2-bit 直接崩溃
+- **威胁排序**：cell_bits >> write noise > ADC ≈ DAC > read noise ≈ array size
+- cell_bits 是 CMM 当前最严苛的精度瓶颈：4-bit 已造成明显退化，2-bit 直接崩溃
+- ADC/DAC 在当前 CMM 等效模型中都较温和：6-bit 基本可用，4-bit 才进入明显退化区
 - write noise 受 r-state clamp [0,1] 天然抑制，即使 1e-2 也远未崩溃
-- read noise 完全无害，与 CrossSim 结论一致
+- read noise 与 array size 基本无害，与当前理想化 CMM 建模的鲁棒性一致
+
+**总结**：
+
+本阶段围绕 `CMMLinear` 论文式等效忆阻器模型，系统完成了 **cell_bits、ADC、DAC、array size、write noise、read noise** 六类消融实验，并在 COCO caption 任务上使用 BLEU、METEOR、ROUGE-L、CIDEr、SPICE 等指标进行了评估。整体结果表明，**当前 PyTorch CMM 等效模型对多数非理想因素表现出较强鲁棒性，真正显著影响性能的主要是 `cell_bits` 量化精度**。
+
+从全部实验结果看，`cell_bits` 是当前最主要的精度瓶颈：`cell_bits >= 6` 时模型基本稳定，`cell_bits = 4` 时开始出现明显退化，而 `cell_bits = 2` 时已经无法支撑 caption 质量。相比之下，`write noise` 虽然会带来一定波动，但即使增大到 `1e-2` 也仅造成轻微下降，远弱于 CrossSim 中同级别写噪声的灾难性影响，这说明当前 CMM 中写噪声路径更“温和”，其一个重要原因是噪声作用在归一化 `r-state` 上并被 clamp 到 `[0,1]` 合法范围。
+
+`read noise` 在全部测试范围内基本无害，甚至在 `1e-3 ~ 3e-3` 区间还出现轻微正向波动；这与 CrossSim 的结论一致，说明读取噪声不会改变存储状态，在序列生成任务中容易被多 token 平均化。与此同时，ADC/DAC 分辨率的影响也明显弱于预期：`8-bit` 及以上几乎无损，`6-bit` 仍基本可用，`4-bit` 才开始明显退化，但仍未达到 CrossSim 中相同条件下的严重崩溃程度。`array size` 则几乎不影响 caption 质量，`64×64 ~ 512×512` 之间没有观察到单调退化趋势，说明当前 CMM 等效模型对 tile 切分本身并不敏感。
+
+综合来看，当前 CMM 消融实验说明：**PyTorch CMM 等效模型的主要威胁来源是状态量化误差，其次才是写入噪声，而 read noise、ADC/DAC 量化和 array size 的影响都相对较弱。** 这也意味着当前 CMM 建模整体偏理想化、偏温和，尚未复现 CrossSim/VTEAM 器件模型中更强烈的误差累积效应。因此，这一阶段实验的核心价值，一方面在于验证 CMM 映射与评估管线已经跑通，另一方面也为下一步的 **Module-wise sensitivity analysis** 与 **CrossSim 接入 CMM 对照实验** 提供了清晰的基线。
 
 ---
 

@@ -24,8 +24,8 @@ class CMMLinear(nn.Module):
     CMM 使用忆阻值而不是电导存权重。这里保存正/负两套阵列的内部状态 r，
     forward 时按 Rmem = Ron * r + Roff * (1-r) 还原等效权重幅值。
 
-    r_pos/r_neg 表示归一化忆阻状态（0=最低阻=Ron, 1=最高阻=Roff），
-    对应论文映射 w = (Roff - r*Roff + r*Ron - Rmin) / (Rmax - Rmin)。
+    r_pos/r_neg 表示归一化忆阻状态（1=最低阻=Ron, 0=最高阻=Roff），
+    对应论文映射 w = 1 - r。
     weight_scale 存储原始 nn.Linear 权重的最大绝对值，用于还原幅值。
     """
 
@@ -41,6 +41,8 @@ class CMMLinear(nn.Module):
         read_noise_std: float = 0.0,
         tile_rows: int = 128,
         tile_cols: int = 128,
+        adc_resolution: int = 0,
+        dac_resolution: int = 0,
     ) -> None:
         super().__init__()
         if rmin <= 0 or rmax <= 0 or rmin >= rmax:
@@ -51,6 +53,8 @@ class CMMLinear(nn.Module):
             raise ValueError("read_noise_std 必须大于等于 0。")
         if tile_rows <= 0 or tile_cols <= 0:
             raise ValueError("tile_rows/tile_cols 必须为正整数。")
+        if adc_resolution < 0 or dac_resolution < 0:
+            raise ValueError("adc_resolution/dac_resolution 必须大于等于 0。")
 
         self.in_features = int(in_features)
         self.out_features = int(out_features)
@@ -60,6 +64,8 @@ class CMMLinear(nn.Module):
         self.read_noise_std = float(read_noise_std)
         self.tile_rows = int(tile_rows)
         self.tile_cols = int(tile_cols)
+        self.adc_resolution = int(adc_resolution)
+        self.dac_resolution = int(dac_resolution)
 
         # r_pos/r_neg：核心内部态，保存为 buffer（不参与 autograd）
         self.register_buffer("r_pos", torch.ones(out_features, in_features))
@@ -82,6 +88,8 @@ class CMMLinear(nn.Module):
         read_noise_std: float = 0.0,
         tile_rows: int = 128,
         tile_cols: int = 128,
+        adc_resolution: int = 0,
+        dac_resolution: int = 0,
     ) -> "CMMLinear":
         """从 nn.Linear 生成 CMMLinear，bias 第一版保留在数字域。"""
         if write_noise_std < 0:
@@ -97,6 +105,8 @@ class CMMLinear(nn.Module):
             read_noise_std=read_noise_std,
             tile_rows=tile_rows,
             tile_cols=tile_cols,
+            adc_resolution=adc_resolution,
+            dac_resolution=dac_resolution,
         )
         # 提取权重并按最大绝对值归一化到 [0, 1]
         weight = linear.weight.detach().to(dtype=torch.float32)
@@ -159,12 +169,30 @@ class CMMLinear(nn.Module):
         neg = self._memristance_to_weight(self.r_neg)
         return (pos - neg) * self.weight_scale
 
+    @staticmethod
+    def _quantize_symmetric(values: torch.Tensor, bits: int) -> torch.Tensor:
+        """对称 signed uniform 量化；bits=0 表示理想通路，不做量化。
+
+        第一版使用当前张量的动态最大绝对值作为量化范围，避免引入校准流程。
+        """
+        if bits <= 0:
+            return values
+        max_abs = values.detach().abs().amax()
+        if float(max_abs) == 0.0:
+            return values
+        levels = (1 << (bits - 1)) - 1
+        if levels <= 0:
+            # 1 bit signed 情况只有符号位，保守退化为二值幅值。
+            return torch.sign(values) * max_abs
+        scaled = torch.clamp(values / max_abs, -1.0, 1.0)
+        return torch.round(scaled * levels) / levels * max_abs
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """按 CMM tile 分块执行线性变换，支持 [B, D] 与 [B, T, D] 等输入形状。
 
         先将有效权重按 tile_rows × tile_cols 切块，逐块计算 partial sum
-        再拼回完整输出。当前无 tile-wise ADC 时数值等价 nn.Linear，
-        但结构上已显式对应 CMM 阵列分块，后续可在 partial 处加入量化/饱和。
+        再拼回完整输出。DAC 量化作用在每个输入 tile，ADC 量化作用在每个
+        partial sum；两者 resolution=0 时保持理想通路，数值等价 nn.Linear。
         """
         weight = self.effective_weight()
 
@@ -178,8 +206,10 @@ class CMMLinear(nn.Module):
             for in_start in range(0, self.in_features, self.tile_cols):
                 in_end = min(in_start + self.tile_cols, self.in_features)
                 x_tile = input[..., in_start:in_end]
+                x_tile = self._quantize_symmetric(x_tile, self.dac_resolution)
                 w_tile = weight[out_start:out_end, in_start:in_end]
                 partial = F.linear(x_tile, w_tile, None)
+                partial = self._quantize_symmetric(partial, self.adc_resolution)
                 # 累加同一输出块对应不同输入块的 partial sum
                 y_block = partial if y_block is None else y_block + partial
 
@@ -202,6 +232,8 @@ def convert_module_to_cmm(
     read_noise_std: float = 0.0,
     tile_rows: int = 128,
     tile_cols: int = 128,
+    adc_resolution: int = 0,
+    dac_resolution: int = 0,
 ) -> nn.Module:
     """递归替换模块中的 nn.Linear → CMMLinear，保持原模块结构不变。
 
@@ -219,6 +251,8 @@ def convert_module_to_cmm(
             read_noise_std=read_noise_std,
             tile_rows=tile_rows,
             tile_cols=tile_cols,
+            adc_resolution=adc_resolution,
+            dac_resolution=dac_resolution,
         )
 
     # 容器模块 → 深拷贝后递归替换子模块
@@ -237,6 +271,8 @@ def convert_module_to_cmm(
                     read_noise_std=read_noise_std,
                     tile_rows=tile_rows,
                     tile_cols=tile_cols,
+                    adc_resolution=adc_resolution,
+                    dac_resolution=dac_resolution,
                 ),
             )
         else:
@@ -252,6 +288,8 @@ def convert_module_to_cmm(
                     read_noise_std=read_noise_std,
                     tile_rows=tile_rows,
                     tile_cols=tile_cols,
+                    adc_resolution=adc_resolution,
+                    dac_resolution=dac_resolution,
                 ),
             )
     return converted

@@ -28,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-features", type=int, default=4)
     parser.add_argument("--tile-rows", type=int, default=3)
     parser.add_argument("--tile-cols", type=int, default=5)
+    parser.add_argument("--adc-resolution", type=int, default=0)
+    parser.add_argument("--dac-resolution", type=int, default=0)
     parser.add_argument("--d-model", type=int, default=16)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--ffn-dim", type=int, default=32)
@@ -72,6 +74,8 @@ def check_linear_equivalence(args: argparse.Namespace, device: torch.device) -> 
         write_noise_std=0.0,
         tile_rows=args.tile_rows,
         tile_cols=args.tile_cols,
+        adc_resolution=args.adc_resolution,
+        dac_resolution=args.dac_resolution,
     ).to(device).eval()
 
     # 测试 2D（batch×features）和 3D（batch×seq×features）输入
@@ -88,6 +92,29 @@ def check_linear_equivalence(args: argparse.Namespace, device: torch.device) -> 
         print(f"{label} Max error: {max_error:.10f}")
         if max_error > args.tol:
             raise AssertionError(f"{label} CMMLinear max error {max_error:.6g} exceeds tol {args.tol:.6g}")
+
+
+@torch.no_grad()
+def check_quantized_path(device: torch.device) -> None:
+    """验证 DAC/ADC 量化路径可运行，并且低 bit 会改变输出。"""
+    digital = nn.Linear(8, 4).to(device).eval()
+    ideal = CMMLinear.from_linear(digital, tile_rows=3, tile_cols=5).to(device).eval()
+    quantized = CMMLinear.from_linear(
+        digital,
+        tile_rows=3,
+        tile_cols=5,
+        adc_resolution=4,
+        dac_resolution=4,
+    ).to(device).eval()
+    x = torch.randn(2, 3, 8, device=device)
+    ideal_y = ideal(x)
+    quantized_y = quantized(x)
+    if not torch.isfinite(quantized_y).all():
+        raise AssertionError("Quantized CMMLinear produced non-finite values.")
+    diff = (ideal_y - quantized_y).abs().max().item()
+    print(f"Quantized path max delta: {diff:.10f}")
+    if diff == 0.0:
+        raise AssertionError("Quantized CMMLinear should differ from ideal output at 4-bit ADC/DAC.")
 
 
 def check_decoder_only_mapping(args: argparse.Namespace, device: torch.device) -> None:
@@ -128,7 +155,11 @@ def main() -> None:
     print("=== CMM Linear Equivalence Check ===")
     print(f"Device: {device}")
     print(f"Tile shape: ({args.tile_rows}, {args.tile_cols})")
+    print(f"ADC/DAC resolution: {args.adc_resolution}/{args.dac_resolution}")
     check_linear_equivalence(args, device)
+
+    print("=== CMM ADC/DAC Quantization Path Check ===")
+    check_quantized_path(device)
 
     # 第二步：检查 decoder_only 映射范围的正确性
     print("=== CMM Mapping Scope Check ===")
