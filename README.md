@@ -8,7 +8,7 @@
 
 LSTM-CMM 已在先前工作中被验证为一种可行的架构，但 Transformer 作为当前 NLP/CV 领域的主流架构，其大规模线性投影（Q/K/V/O、FFN）是否能被 CMM 有效支持？写入误差对 self-attention 和 FFN 两部分的影响孰重孰轻？这些问题尚未被系统性研究。
 
-本项目旨在 **将 Transformer 解码器中的线性层映射到 CMM crossbar 上**，通过 CrossSim 进行误差注入仿真，评估不同写入精度（it-10 ~ it-6）、ADC/DAC 分辨率、读噪声和阵列规模下的模型性能退化，为硬件设计提供指导。
+本项目旨在 **将 Transformer 解码器中的线性层映射到 CMM crossbar 上**，通过 CrossSim 进行误差注入仿真，评估不同写入精度（it-10 ~ it-6）、ADC/DAC 分辨率、读噪声和阵列规模下的模型性能退化，为硬件设计提供指导。此外，项目现已支持 **CMM → CrossSim** 两级映射：先用论文式 `CMMLinear` / CMM 参数对 `nn.Linear` 建模，再将其写入 CrossSim 器件路径，以比较“等效模型”与“真实 crossbar 仿真”下非理想效应的差异。
 
 ## 2. 系统架构
 
@@ -115,6 +115,17 @@ W_real → W_mapped → W_written = W_real + write_noise
 | 写入噪声 (write_noise_std) | 0 | 0 ~ 1e-2 (3 seeds) |
 | 读噪声 (read_noise_std) | 0 | 0 ~ 1e-2 (3 seeds) |
 
+**CMM-CrossSim 消融实验维度**（先按 CMM 参数映射，再写入 CrossSim 器件路径）：
+
+| 实验维度 | 当前基线/默认值 | 扫描范围 |
+|----------|-----------------|----------|
+| cell_bits 量化 | 0 (连续) / nominal=8 bit | 2 ~ 8 bit, continuous |
+| 写入噪声 (write_noise_std) | 0 / nominal=1e-3 | 0 ~ 1e-2 |
+| 读噪声 (read_noise_std) | 0 / nominal=1e-4 | 0 ~ 1e-2 |
+| ADC 分辨率 | 0 (理想) / nominal=10 bit | 4 ~ 12 bit |
+| DAC 分辨率 | 0 (理想) / nominal=12 bit | 4 ~ 12 bit |
+| 阵列规模 (tile shape) | 128×128 | 64×64 ~ 512×512 |
+
 ### 阶段三：硬件架构设计
 
 将完整的 Transformer decoder block 映射为 CMM tile 结构，评估：
@@ -140,6 +151,10 @@ W_real → W_mapped → W_written = W_real + write_noise
 | **CMM cell_bits 消融** | 不同 cell_bits (2-bit ~ continuous) |
 | **CMM 写入噪声消融** | 不同 write_noise_std (0 ~ 1e-2, 3 seeds) |
 | **CMM 读噪声消融** | 不同 read_noise_std (0 ~ 1e-2, 3 seeds) |
+| **CMM-CrossSim 理想基线** | 先按 CMM 参数映射，再写入 CrossSim；ADC/DAC=0、无读写噪声 |
+| **CMM-CrossSim nominal 基线** | cell_bits=8, write/read noise=1e-3/1e-4, ADC/DAC=10/12 |
+| **CMM-CrossSim ADC 消融** | CrossSim 路径下扫描 ADC bit，对比真实器件路径中的量化敏感性 |
+| **CMM-CrossSim DAC 消融** | CrossSim 路径下扫描 DAC bit，验证 DAC 是输入侧主导瓶颈 |
 | **读噪声消融** | 不同 read_noise_std (0 ~ 1e-2) |
 | **阵列规模消融** | tile 64×64 / 128×128 / 256×256 / 512×512 |
 
@@ -189,6 +204,14 @@ CMM/
 │   ├── test_cmm_cell_bits_conditions.py           # CMM cell_bits 量化消融
 │   ├── test_cmm_write_noise_conditions.py         # CMM 写入噪声消融
 │   ├── test_cmm_read_noise_conditions.py          # CMM 读噪声消融
+│   ├── map_cmm_crosssim.py                # CMM 参数写入 CrossSim 器件路径
+│   ├── test_cmm_crosssim_baseline.py      # CMM-CrossSim 理想/nominal 基线构建
+│   ├── test_cmm_crosssim_cell_bits_conditions.py  # CMM-CrossSim cell_bits 消融
+│   ├── test_cmm_crosssim_write_noise_conditions.py # CMM-CrossSim 写噪声消融
+│   ├── test_cmm_crosssim_read_noise_conditions.py  # CMM-CrossSim 读噪声消融
+│   ├── test_cmm_crosssim_adc_conditions.py         # CMM-CrossSim ADC 消融
+│   ├── test_cmm_crosssim_dac_conditions.py         # CMM-CrossSim DAC 消融
+│   ├── test_cmm_crosssim_array_size_conditions.py  # CMM-CrossSim 阵列规模消融
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── encoder.py                      # ResNet-50 图像编码器
@@ -433,7 +456,33 @@ python -m src.map_cmm --checkpoint checkpoints/caption_transformer_epoch_10.pt \
 python -m src.check_cmm_linear_equivalence
 ```
 
-### CMM 映射参数速查
+### CMM-CrossSim 映射（CMM 参数写入 CrossSim 器件路径）
+
+该路径先使用 CMM 风格参数（`rmin/rmax`、`cell_bits`、`write_noise_std`、`read_noise_std`）构建权重，再写入 CrossSim `AnalogLinear` 器件模型，用于比较“PyTorch 等效 CMM”与“真实 crossbar 仿真”之间的误差传播差异。
+
+```bash
+# 构建理想 CMM-CrossSim 基线（ADC/DAC=0, 无读写噪声）
+python -m src.test_cmm_crosssim_baseline \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --output-dir checkpoints/cmm_crosssim_conditions
+
+# 单次映射并保存 CMM-CrossSim 模型
+python -m src.map_cmm_crosssim \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --adc-resolution 10 --dac-resolution 12 \
+    --cell-bits 8 --write-noise-std 0.001 --read-noise-std 0.0001 \
+    --output checkpoints/caption_nominal_cmm_crosssim_ideal.pt
+
+# CMM-CrossSim ADC 消融
+python -m src.test_cmm_crosssim_adc_conditions \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --output-dir checkpoints/cmm_crosssim_adc_conditions
+
+# CMM-CrossSim DAC 消融
+python -m src.test_cmm_crosssim_dac_conditions \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --output-dir checkpoints/cmm_crosssim_dac_conditions
+```
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -468,5 +517,11 @@ python -m src.check_cmm_linear_equivalence
 - [ ] Mem32 对照实验
 - [ ] 硬件性能建模（延迟/能耗/面积）
 - [x] CMM 论文式映射（`map_cmm.py` + `CMMLinear`）
-- [ ] CMM 写入噪声消融实验（it-10 ~ it-6）
+- [x] CMM cell_bits 量化消融
+- [x] CMM 写入噪声消融
+- [x] CMM 读噪声消融
+- [x] CMM-CrossSim 理想基线验证（`cmm_crosssim_v1`）
+- [x] CMM-CrossSim ADC 分辨率消融
+- [x] CMM-CrossSim DAC 分辨率消融
+- [ ] CMM-CrossSim cell_bits / write noise / read noise / array size 全量消融
 - [ ] CMM 非理想特性联调（write noise + read noise + ADC/DAC + array size）
