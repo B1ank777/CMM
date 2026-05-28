@@ -155,8 +155,10 @@ W_real → W_mapped → W_written = W_real + write_noise
 | **CMM-CrossSim nominal 基线** | cell_bits=8, write/read noise=1e-3/1e-4, ADC/DAC=10/12 |
 | **CMM-CrossSim ADC 消融** | CrossSim 路径下扫描 ADC bit，对比真实器件路径中的量化敏感性 |
 | **CMM-CrossSim DAC 消融** | CrossSim 路径下扫描 DAC bit，验证 DAC 是输入侧主导瓶颈 |
-| **读噪声消融** | 不同 read_noise_std (0 ~ 1e-2) |
-| **阵列规模消融** | tile 64×64 / 128×128 / 256×256 / 512×512 |
+| **CMM-CrossSim cell_bits 消融** | CMM 状态量化后写入 CrossSim，扫描 2bit ~ continuous |
+| **CMM-CrossSim 写入噪声消融** | CMM r 状态写入噪声后经 CrossSim 路径，0 ~ 1e-2 (3 seeds) |
+| **CMM-CrossSim 读噪声消融** | CrossSim 路径下扫描 read_noise_std，0 ~ 1e-2 (3 seeds) |
+| **CMM-CrossSim 阵列规模消融** | CrossSim tile 64×64 / 128×128 / 256×256 / 512×512 |
 
 ## 5. 评价指标
 
@@ -482,6 +484,26 @@ python -m src.test_cmm_crosssim_adc_conditions \
 python -m src.test_cmm_crosssim_dac_conditions \
     --checkpoint checkpoints/caption_transformer_epoch_10.pt \
     --output-dir checkpoints/cmm_crosssim_dac_conditions
+
+# CMM-CrossSim cell_bits 消融
+python -m src.test_cmm_crosssim_cell_bits_conditions \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --output-dir checkpoints/cmm_crosssim_cell_bits_conditions
+
+# CMM-CrossSim 写入噪声消融
+python -m src.test_cmm_crosssim_write_noise_conditions \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --output-dir checkpoints/cmm_crosssim_write_noise_conditions
+
+# CMM-CrossSim 读噪声消融
+python -m src.test_cmm_crosssim_read_noise_conditions \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --output-dir checkpoints/cmm_crosssim_read_noise_conditions
+
+# CMM-CrossSim 阵列规模消融
+python -m src.test_cmm_crosssim_array_size_conditions \
+    --checkpoint checkpoints/caption_transformer_epoch_10.pt \
+    --output-dir checkpoints/cmm_crosssim_array_size_conditions
 ```
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -523,5 +545,5 @@ python -m src.test_cmm_crosssim_dac_conditions \
 - [x] CMM-CrossSim 理想基线验证（`cmm_crosssim_v1`）
 - [x] CMM-CrossSim ADC 分辨率消融
 - [x] CMM-CrossSim DAC 分辨率消融
-- [ ] CMM-CrossSim cell_bits / write noise / read noise / array size 全量消融
+- [x] CMM-CrossSim cell_bits / write noise / read noise / array size 全量消融
 - [ ] CMM 非理想特性联调（write noise + read noise + ADC/DAC + array size）
