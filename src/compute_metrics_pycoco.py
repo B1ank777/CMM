@@ -5,6 +5,9 @@
 #
 # 示例:
 #   python -m src.compute_metrics_pycoco --baseline-checkpoint checkpoints/caption_transformer_epoch_10.pt --conditions-manifest checkpoints/cmm_cell_bits_conditions/conditions_manifest.json --output checkpoints/cmm_cell_bits_conditions/metrics_pycoco.json --limit 500
+#
+#   # 大显存 GPU 上可提高 batch-size 和 num-workers，减少逐图推理造成的 GPU 空等
+#   python -m src.compute_metrics_pycoco --baseline-checkpoint checkpoints/caption_transformer_epoch_10.pt --conditions-manifest checkpoints/cmm_crosssim_adc_conditions/conditions_manifest.json --batch-size 128 --num-workers 8
 
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from typing import Any, Dict, List, Tuple
 
 import torch
 from PIL import Image
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from .coco_preprocess.loader import DEFAULT_COCO_ROOT, default_image_transform
@@ -39,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="推理设备")
     parser.add_argument("--max-len", type=int, default=30, help="生成描述的最大长度")
     parser.add_argument("--limit", type=int, default=1000, help="评测图片数量上限")
+    parser.add_argument("--batch-size", type=int, default=32, help="批量生成描述时的图片 batch size")
+    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader 读图进程数")
     return parser.parse_args()
 
 
@@ -123,6 +129,50 @@ def generate_caption(model, image_tensor, vocab, device, max_len):
     return vocab.decode(tokens.detach().cpu().tolist())  # token id -> 文本
 
 
+class CocoEvalImageDataset(Dataset):
+    """COCO 评测图片数据集，只返回生成描述所需的 image_id 与图像张量。"""
+
+    def __init__(self, coco_root: Path, image_ids: List[int], id2file: Dict[int, str]) -> None:
+        self.coco_root = coco_root
+        self.image_ids = image_ids
+        self.id2file = id2file
+        self.transform = default_image_transform(224)
+
+    def __len__(self) -> int:
+        return len(self.image_ids)
+
+    def __getitem__(self, index: int) -> Tuple[int, torch.Tensor]:
+        image_id = int(self.image_ids[index])
+        file_name = self.id2file[image_id]
+        img = Image.open(self.coco_root / "val2014" / file_name).convert("RGB")
+        return image_id, self.transform(img)
+
+
+@torch.no_grad()
+def generate_caption_batch(model, images: torch.Tensor, vocab: Vocabulary, device: torch.device, max_len: int) -> List[str]:
+    """批量自回归生成描述，保持贪心解码逻辑与单图 generate 一致。"""
+    model.eval()
+    bos_id = vocab.stoi["<bos>"]
+    eos_id = vocab.stoi["<eos>"]
+    images = images.to(device, non_blocking=True)
+    batch_size = images.size(0)
+
+    tokens = torch.full((batch_size, 1), bos_id, device=device, dtype=torch.long)
+    finished = torch.zeros(batch_size, device=device, dtype=torch.bool)
+
+    for _ in range(max_len - 1):
+        logits = model(images, tokens)
+        next_ids = logits[:, -1, :].argmax(dim=-1)
+        # 已经生成 EOS 的样本继续填 EOS，避免不同长度样本破坏 batch 对齐。
+        next_ids = torch.where(finished, torch.full_like(next_ids, eos_id), next_ids)
+        tokens = torch.cat([tokens, next_ids[:, None]], dim=1)
+        finished |= next_ids.eq(eos_id)
+        if bool(finished.all()):
+            break
+
+    return [vocab.decode(row.tolist()) for row in tokens.detach().cpu()]
+
+
 def collect_image_ids(coco_annotation: Path, limit: int) -> List[int]:
     """从 COCO 标注文件中收集图片 ID 列表（受 limit 限制）"""
     with coco_annotation.open("r", encoding="utf-8") as f:
@@ -139,6 +189,8 @@ def build_predictions_json(
     out_path: Path,
     device: torch.device,
     max_len: int,
+    batch_size: int,
+    num_workers: int,
 ):
     """对指定图片列表批量生成描述，保存为 COCO 格式的预测 JSON 文件"""
     ann_path = coco_root / "annotations" / "captions_val2014.json"
@@ -146,15 +198,20 @@ def build_predictions_json(
         data = json.load(f)
 
     id2file = {img["id"]: img["file_name"] for img in data["images"]}  # 图片 id -> 文件名
-    transform = default_image_transform(224)
+    dataset = CocoEvalImageDataset(coco_root=coco_root, image_ids=image_ids, id2file=id2file)
+    loader = DataLoader(
+        dataset,
+        batch_size=max(1, batch_size),
+        shuffle=False,
+        num_workers=max(0, num_workers),
+        pin_memory=device.type == "cuda",
+    )
 
     preds = []
-    for image_id in tqdm(image_ids, desc=f"generate:{out_path.stem}", leave=False):
-        file_name = id2file[image_id]
-        img = Image.open(coco_root / "val2014" / file_name).convert("RGB")
-        image_tensor = transform(img)
-        caption = generate_caption(model, image_tensor, vocab, device, max_len=max_len)
-        preds.append({"image_id": int(image_id), "caption": caption})
+    for batch_ids, images in tqdm(loader, desc=f"generate:{out_path.stem}", leave=False):
+        captions = generate_caption_batch(model, images, vocab, device, max_len=max_len)
+        for image_id, caption in zip(batch_ids.tolist(), captions):
+            preds.append({"image_id": int(image_id), "caption": caption})
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
@@ -192,7 +249,17 @@ def main() -> None:
 
     # 评测基线模型
     baseline_pred = output_dir / "baseline_predictions.json"
-    build_predictions_json(base_model, vocab, args.coco_root, image_ids, baseline_pred, device, args.max_len)
+    build_predictions_json(
+        base_model,
+        vocab,
+        args.coco_root,
+        image_ids,
+        baseline_pred,
+        device,
+        args.max_len,
+        args.batch_size,
+        args.num_workers,
+    )
     baseline_metrics = evaluate_with_pycoco(COCO, COCOEvalCap, gt_ann, baseline_pred, image_ids)
     rows.append({"model": "baseline", "checkpoint": str(args.baseline_checkpoint), "metrics": baseline_metrics})
 
@@ -206,7 +273,17 @@ def main() -> None:
             set_eval_seed(item["seed"])
         crosssim_model, _ = load_crosssim_model(ckpt, base_model, device)
         pred_file = output_dir / f"{cond}_predictions.json"
-        build_predictions_json(crosssim_model, vocab, args.coco_root, image_ids, pred_file, device, args.max_len)
+        build_predictions_json(
+            crosssim_model,
+            vocab,
+            args.coco_root,
+            image_ids,
+            pred_file,
+            device,
+            args.max_len,
+            args.batch_size,
+            args.num_workers,
+        )
         metrics = evaluate_with_pycoco(COCO, COCOEvalCap, gt_ann, pred_file, image_ids)
 
         rows.append(

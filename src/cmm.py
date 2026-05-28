@@ -150,7 +150,7 @@ class CMMLinear(nn.Module):
 
         Rmem = Ron * r + Roff * (1 - r)，然后将 Rmem 线性映射回 [0, 1]。
         """
-        # 计算忆阻值：r=0→Ron, r=1→Roff
+        # 计算忆阻值：r=1→Ron(rmin), r=0→Roff(rmax)
         rmem = self.rmin * r_state + self.rmax * (1.0 - r_state)
         if self.read_noise_std > 0:
             # 读噪声按忆阻值比例扰动，随后裁剪回物理阻值范围

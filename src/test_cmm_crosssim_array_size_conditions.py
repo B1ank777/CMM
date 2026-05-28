@@ -134,7 +134,6 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
 
     # 固定本实验的非 sweep 变量，避免命令行误改导致实验含义漂移。
     args.cell_bits = 0
-    args.adc_resolution = 0
     args.dac_resolution = 0
     args.read_noise_std = 1e-4
     args.write_noise_std = 1e-4
@@ -209,12 +208,12 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                 "tile_rows": str(tile_rows),
                 "tile_cols": str(tile_cols),
                 "array_size": f"{tile_rows}x{tile_cols}",
-                "adc_resolution": "0",
-                "dac_resolution": "0",
-                "cell_bits": "0",
-                "write_noise_std": "0.0001",
-                "crosssim_programming_error_std": "0.0001",
-                "read_noise_std": "0.0001",
+                "adc_resolution": str(args.adc_resolution),
+                "dac_resolution": str(args.dac_resolution),
+                "cell_bits": str(args.cell_bits),
+                "write_noise_std": str(args.write_noise_std),
+                "crosssim_programming_error_std": str(args.write_noise_std),
+                "read_noise_std": str(args.read_noise_std),
                 "seed": str(args.seed),
                 "num_mapped_linear": str(num_mapped_linear),
                 "checkpoint": str(out_path),
