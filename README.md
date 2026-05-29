@@ -8,7 +8,7 @@
 
 LSTM-CMM 已在先前工作中被验证为一种可行的架构，但 Transformer 作为当前 NLP/CV 领域的主流架构，其大规模线性投影（Q/K/V/O、FFN）是否能被 CMM 有效支持？写入误差对 self-attention 和 FFN 两部分的影响孰重孰轻？这些问题尚未被系统性研究。
 
-本项目旨在 **将 Transformer 解码器中的线性层映射到 CMM crossbar 上**，通过 CrossSim 进行误差注入仿真，评估不同写入精度（it-10 ~ it-6）、ADC/DAC 分辨率、读噪声和阵列规模下的模型性能退化，为硬件设计提供指导。此外，项目现已支持 **CMM → CrossSim** 两级映射：先用论文式 `CMMLinear` / CMM 参数对 `nn.Linear` 建模，再将其写入 CrossSim 器件路径，以比较“等效模型”与“真实 crossbar 仿真”下非理想效应的差异。
+本项目旨在 **将 Transformer 解码器中的线性层映射到 CMM crossbar 上**，通过 CrossSim 进行误差注入仿真，评估不同写入精度（it-10 ~ it-6）、ADC/DAC 分辨率、读噪声和阵列规模下的模型性能退化，为硬件设计提供指导。此外，项目现已支持 **CMM → CrossSim** 两级映射：先用论文式 `CMMLinear` / CMM 参数对 `nn.Linear` 建模，再将其写入 CrossSim 器件路径，以比较”等效模型”与”真实 crossbar 仿真”下非理想效应的差异。项目还包含 **SPICE 级能耗验证**：从 CMM-CrossSim 真实电导和 COCO 激活值估计 decoder crossbar core 读能耗，并与数字 MAC 参考能耗对比。
 
 ## 2. 系统架构
 
@@ -126,15 +126,17 @@ W_real → W_mapped → W_written = W_real + write_noise
 | DAC 分辨率 | 0 (理想) / nominal=12 bit | 4 ~ 12 bit |
 | 阵列规模 (tile shape) | 128×128 | 64×64 ~ 512×512 |
 
-### 阶段三：硬件架构设计
+### 阶段三：硬件架构设计与能耗验证
 
 将完整的 Transformer decoder block 映射为 CMM tile 结构，评估：
 
 - 延迟（Latency）
-- 能耗（Energy）
+- **能耗（Energy）— 已完成 SPICE 级 crossbar core 读能耗估计**
 - 面积（Area）
 - ADC/DAC 开销
 - 写入误差敏感度
+
+**能耗验证方法**：从 CMM-CrossSim checkpoint 中提取真实 CrossSim core 电导矩阵，使用 COCO 验证集真实 activation（通过 forward hooks 捕获），以 `per_vector` 缩放到 `[-Vread, Vread]`，解析计算每个 tile 的读功耗。选取 high/median/low 能耗 tile，用 ngspice 瞬态仿真验证解析能量，并输出与数字 MAC 参考能耗的对比。
 
 ## 4. 实验对照组
 
@@ -151,6 +153,9 @@ W_real → W_mapped → W_written = W_real + write_noise
 | **CMM cell_bits 消融** | 不同 cell_bits (2-bit ~ continuous) |
 | **CMM 写入噪声消融** | 不同 write_noise_std (0 ~ 1e-2, 3 seeds) |
 | **CMM 读噪声消融** | 不同 read_noise_std (0 ~ 1e-2, 3 seeds) |
+| **CMM ADC 消融** | CMM 路径下扫描 ADC bit (0, 12, 10, 8, 6, 4)，DAC 固定为 0 |
+| **CMM DAC 消融** | CMM 路径下扫描 DAC bit (0, 12, 10, 8, 6, 4)，ADC 固定为 0 |
+| **CMM 阵列规模消融** | CMM tile 64×64 / 128×128 / 256×256 / 512×512，ADC=8 bit |
 | **CMM-CrossSim 理想基线** | 先按 CMM 参数映射，再写入 CrossSim；ADC/DAC=0、无读写噪声 |
 | **CMM-CrossSim nominal 基线** | cell_bits=8, write/read noise=1e-3/1e-4, ADC/DAC=10/12 |
 | **CMM-CrossSim ADC 消融** | CrossSim 路径下扫描 ADC bit，对比真实器件路径中的量化敏感性 |
@@ -159,6 +164,7 @@ W_real → W_mapped → W_written = W_real + write_noise
 | **CMM-CrossSim 写入噪声消融** | CMM r 状态写入噪声后经 CrossSim 路径，0 ~ 1e-2 (3 seeds) |
 | **CMM-CrossSim 读噪声消融** | CrossSim 路径下扫描 read_noise_std，0 ~ 1e-2 (3 seeds) |
 | **CMM-CrossSim 阵列规模消融** | CrossSim tile 64×64 / 128×128 / 256×256 / 512×512 |
+| **SPICE 能耗验证** | 从 CMM-CrossSim 电导 + COCO activation 估计 crossbar core 读能耗，ngspice 验证 |
 
 ## 5. 评价指标
 
@@ -206,6 +212,11 @@ CMM/
 │   ├── test_cmm_cell_bits_conditions.py           # CMM cell_bits 量化消融
 │   ├── test_cmm_write_noise_conditions.py         # CMM 写入噪声消融
 │   ├── test_cmm_read_noise_conditions.py          # CMM 读噪声消融
+│   ├── test_cmm_adc_conditions.py                 # CMM ADC 分辨率消融
+│   ├── test_cmm_dac_conditions.py                 # CMM DAC 分辨率消融
+│   ├── test_cmm_array_size_conditions.py          # CMM 阵列规模消融
+│   ├── summarize_cmm_write_noise_metrics.py       # CMM 写入噪声多 seed 汇总
+│   ├── summarize_cmm_read_noise_metrics.py        # CMM 读噪声多 seed 汇总
 │   ├── map_cmm_crosssim.py                # CMM 参数写入 CrossSim 器件路径
 │   ├── test_cmm_crosssim_baseline.py      # CMM-CrossSim 理想/nominal 基线构建
 │   ├── test_cmm_crosssim_cell_bits_conditions.py  # CMM-CrossSim cell_bits 消融
@@ -226,6 +237,13 @@ CMM/
 │       ├── vocab.py                        # 词表构建与编解码
 │       ├── dataset.py                      # PyTorch Dataset 与 collate_fn
 │       └── loader.py                       # DataLoader 构建与图像变换
+├── experiments/
+│   └── spice/                              # SPICE 级 crossbar 读能耗实验
+│       ├── README.md                       # SPICE 实验说明
+│       ├── run_crossbar_read.py            # 基础 crossbar 读功耗 ngspice 实验
+│       ├── estimate_cmm_crosssim_read_energy.py  # CMM-CrossSim activation-aware 读能耗估计
+│       ├── test_extract_conductance.py     # CrossSim core 电导提取测试
+│       └── results/                        # 实验结果输出 (gitignored)
 └── checkpoints/                            # 训练检查点（运行时生成）
 ```
 
@@ -399,6 +417,19 @@ python -m src.test_cmm_write_noise_conditions     --checkpoint checkpoints/capti
 # 读噪声消融（0 ~ 1e-2, 3 seeds）
 python -m src.test_cmm_read_noise_conditions     --checkpoint checkpoints/caption_transformer_epoch_10.pt     --output-dir checkpoints/cmm_read_noise_conditions
 
+# ADC 分辨率消融（0 ~ 12 bit）
+python -m src.test_cmm_adc_conditions     --checkpoint checkpoints/caption_transformer_epoch_10.pt     --output-dir checkpoints/cmm_adc_conditions
+
+# DAC 分辨率消融（0 ~ 12 bit）
+python -m src.test_cmm_dac_conditions     --checkpoint checkpoints/caption_transformer_epoch_10.pt     --output-dir checkpoints/cmm_dac_conditions
+
+# 阵列规模消融（64×64 ~ 512×512）
+python -m src.test_cmm_array_size_conditions     --checkpoint checkpoints/caption_transformer_epoch_10.pt     --output-dir checkpoints/cmm_array_size_conditions
+
+# 多 seed 噪声指标汇总
+python -m src.summarize_cmm_write_noise_metrics     --metrics checkpoints/cmm_write_noise_conditions/metrics_pycoco.json
+python -m src.summarize_cmm_read_noise_metrics     --metrics checkpoints/cmm_read_noise_conditions/metrics_pycoco.json
+
 # 批量评估 CMM 条件模型
 python -m src.compute_metrics_pycoco     --baseline-checkpoint checkpoints/caption_transformer_epoch_10.pt     --conditions-manifest checkpoints/cmm_write_noise_conditions/conditions_manifest.json     --limit 500
 ```
@@ -520,6 +551,42 @@ python -m src.test_cmm_crosssim_array_size_conditions \
 | `--write-noise-std` | float | 0.0 | 写入噪声强度，作用在内部状态 r 上 |
 | `--read-noise-std` | float | 0.0 | 读噪声强度，作用在推理时 Rmem 上 |
 
+### SPICE 级能耗验证
+
+```bash
+# 基础 crossbar 读功耗 ngspice 实验
+python experiments/spice/run_crossbar_read.py --n 16 --vread 0.1 --pulse-ns 10
+python experiments/spice/run_crossbar_read.py --n 32 --pattern sparse --high-ratio 0.3
+
+# CMM-CrossSim activation-aware 读能耗估计（跳过 ngspice 快速模式）
+conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py \
+    --limit 1 --batch-size 1 --device cpu --skip-ngspice
+
+# 完整验证（含 ngspice high/median/low tile 瞬态仿真）
+conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py \
+    --limit 16 --batch-size 1 --device cuda --use-gpu
+
+# 自定义读电压、脉冲宽度和数字 MAC 参考
+conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py \
+    --limit 32 --vread 0.2 --pulse-ns 20 --digital-mac-energy-pj 0.5
+
+# CrossSim core 电导提取测试
+python experiments/spice/test_extract_conductance.py
+```
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--baseline-checkpoint` | Path | `checkpoints/caption_transformer_epoch_10.pt` | 数字基线 checkpoint |
+| `--cmm-crosssim-checkpoint` | Path | `checkpoints/caption_transformer_array-128x128_cmm_crosssim.pt` | CMM-CrossSim checkpoint |
+| `--limit` | int | 16 | 验证集样本数量 |
+| `--batch-size` | int | 1 | DataLoader batch size |
+| `--vread` | float | 0.1 | 读电压幅度 (V) |
+| `--pulse-ns` | float | 10.0 | 读脉冲宽度 (ns) |
+| `--digital-mac-energy-pj` | float | 1.0 | 数字 MAC 参考能耗 (pJ/MAC) |
+| `--skip-ngspice` | flag | False | 跳过 ngspice 验证，仅做解析能耗 |
+| `--device` | str | `cuda`(可用时) | 推理设备 |
+| `--use-gpu` | flag | False | CrossSim GPU 后端 |
+
 ## 10. 开发路线图
 
 - [x] ResNet 图像编码器
@@ -537,13 +604,17 @@ python -m src.test_cmm_crosssim_array_size_conditions \
 - [x] 阵列规模消融实验
 - [ ] VGG-16 编码器支持
 - [ ] Mem32 对照实验
-- [ ] 硬件性能建模（延迟/能耗/面积）
+- [x] **硬件性能建模（SPICE 级 crossbar core 读能耗验证已完成）**
 - [x] CMM 论文式映射（`map_cmm.py` + `CMMLinear`）
 - [x] CMM cell_bits 量化消融
 - [x] CMM 写入噪声消融
 - [x] CMM 读噪声消融
+- [x] CMM ADC 分辨率消融
+- [x] CMM DAC 分辨率消融
+- [x] CMM 阵列规模消融
 - [x] CMM-CrossSim 理想基线验证（`cmm_crosssim_v1`）
 - [x] CMM-CrossSim ADC 分辨率消融
 - [x] CMM-CrossSim DAC 分辨率消融
 - [x] CMM-CrossSim cell_bits / write noise / read noise / array size 全量消融
+- [ ] 面积与延迟建模
 - [ ] CMM 非理想特性联调（write noise + read noise + ADC/DAC + array size）
