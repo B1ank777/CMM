@@ -1,0 +1,44 @@
+* Ideal crossbar read-energy validation
+* rows=16 cols=16 pulse_ns=10
+* Each row is collapsed to an equivalent conductance because columns are ideal virtual ground.
+Vrow0 row0 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow1 row1 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow2 row2 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow3 row3 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow4 row4 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow5 row5 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow6 row6 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow7 row7 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow8 row8 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow9 row9 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow10 row10 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow11 row11 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow12 row12 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow13 row13 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow14 row14 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Vrow15 row15 0 PULSE(0 0.1 0 0.1n 0.1n 10n 30n)
+Reqrow0 row0 0 123.762376238
+Reqrow1 row1 0 123.762376238
+Reqrow2 row2 0 123.762376238
+Reqrow3 row3 0 123.762376238
+Reqrow4 row4 0 123.762376238
+Reqrow5 row5 0 123.762376238
+Reqrow6 row6 0 123.762376238
+Reqrow7 row7 0 123.762376238
+Reqrow8 row8 0 123.762376238
+Reqrow9 row9 0 123.762376238
+Reqrow10 row10 0 123.762376238
+Reqrow11 row11 0 123.762376238
+Reqrow12 row12 0 123.762376238
+Reqrow13 row13 0 123.762376238
+Reqrow14 row14 0 123.762376238
+Reqrow15 row15 0 123.762376238
+Bpwr pwr 0 v = (v(row0)*v(row0)/123.762376238) + (v(row1)*v(row1)/123.762376238) + (v(row2)*v(row2)/123.762376238) + (v(row3)*v(row3)/123.762376238) + (v(row4)*v(row4)/123.762376238) + (v(row5)*v(row5)/123.762376238) + (v(row6)*v(row6)/123.762376238) + (v(row7)*v(row7)/123.762376238) + (v(row8)*v(row8)/123.762376238) + (v(row9)*v(row9)/123.762376238) + (v(row10)*v(row10)/123.762376238) + (v(row11)*v(row11)/123.762376238) + (v(row12)*v(row12)/123.762376238) + (v(row13)*v(row13)/123.762376238) + (v(row14)*v(row14)/123.762376238) + (v(row15)*v(row15)/123.762376238)
+.control
+set filetype=ascii
+tran 0.05n 10.2n
+meas tran energy INTEG v(pwr) FROM=0n TO=10.2n
+wrdata experiments/spice/results/basic_crossbar/16x16_checker.dat v(pwr)
+quit
+.endc
+.end

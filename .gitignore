@@ -7,6 +7,4 @@ CROSSSIM_GUIDE.md
 .vscode/
 .codegraph/
 .cursor/
-log/
-experiments/spice/results/
 experiments/spice/__pycache__/
