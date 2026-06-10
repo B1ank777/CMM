@@ -1,0 +1,23 @@
+{
+  "layers.0.self_attn.q_proj": 77.4368896484375,
+  "layers.0.self_attn.k_proj": 77.4368896484375,
+  "layers.0.self_attn.v_proj": 77.4368896484375,
+  "layers.0.self_attn.o_proj": 51.6447639465332,
+  "layers.0.cross_attn.q_proj": 4.981715679168701,
+  "layers.0.cross_attn.k_proj": 20.6574649810791,
+  "layers.0.cross_attn.v_proj": 20.6574649810791,
+  "layers.0.cross_attn.o_proj": 9.689882278442383,
+  "layers.0.ffn.0": 6.0963850021362305,
+  "layers.0.ffn.3": 10.267325401306152,
+  "layers.1.self_attn.q_proj": 8.837896347045898,
+  "layers.1.self_attn.k_proj": 8.837896347045898,
+  "layers.1.self_attn.v_proj": 8.837896347045898,
+  "layers.1.self_attn.o_proj": 3.9954640865325928,
+  "layers.1.cross_attn.q_proj": 6.734003067016602,
+  "layers.1.cross_attn.k_proj": 20.6574649810791,
+  "layers.1.cross_attn.v_proj": 20.6574649810791,
+  "layers.1.cross_attn.o_proj": 10.997716903686523,
+  "layers.1.ffn.0": 7.801459789276123,
+  "layers.1.ffn.3": 4.66405725479126,
+  "output_proj": 16.009119033813477
+}
