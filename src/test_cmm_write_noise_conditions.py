@@ -1,7 +1,7 @@
 """
 批量构建不同 CMM write_noise_std 下的条件模型。
 
-固定 cell_bits = 0、read_noise_std = 0，只扫描写入噪声。写入噪声在映射时
+固定 ADC/DAC=0/0、cell_bits = 0、read_noise_std = 1e-4，只扫描写入噪声。写入噪声在映射时
 固定进入 r_pos/r_neg，因此每个噪声强度默认构建 seed = 1, 2, 3 三个 checkpoint。
 """
 
@@ -109,9 +109,13 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
     """按 write_noise_std 和 seed 逐个构建 CMM checkpoint。"""
     device = torch.device(args.device)
 
-    # 固定本实验的非噪声变量，避免命令行误改导致 sweep 含义漂移。
+    # 固定本实验的非 sweep 变量，避免 Table XII 的 write_noise 行混入 ADC/DAC/read_noise 差异。
+    args.tile_rows = 128
+    args.tile_cols = 128
     args.cell_bits = 0
-    args.read_noise_std = 0.0
+    args.adc_resolution = 0
+    args.dac_resolution = 0
+    args.read_noise_std = 1e-4
 
     payload, state_dict = load_checkpoint(args.checkpoint, map_location="cpu")
     base_model = build_model_from_payload(payload)
@@ -150,8 +154,11 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                         "write_noise_group": base_condition,
                         "write_noise_std": str(write_noise_std),
                         "seed": str(seed),
+                        "tile_shape": "128x128",
                         "cell_bits": "0",
-                        "read_noise_std": "0.0",
+                        "adc_resolution": "0",
+                        "dac_resolution": "0",
+                        "read_noise_std": "0.0001",
                         "checkpoint": str(out_path),
                     }
                 )
@@ -170,7 +177,9 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                 rmax=args.rmax,
                 cell_bits=0,
                 write_noise_std=write_noise_std,
-                read_noise_std=0.0,
+                read_noise_std=args.read_noise_std,
+                adc_resolution=args.adc_resolution,
+                dac_resolution=args.dac_resolution,
             )
             cmm_model.to(device)
             cmm_model.eval()
@@ -185,7 +194,9 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                     "write_noise_std": write_noise_std,
                     "seed": seed,
                     "cell_bits": 0,
-                    "read_noise_std": 0.0,
+                    "adc_resolution": args.adc_resolution,
+                    "dac_resolution": args.dac_resolution,
+                    "read_noise_std": args.read_noise_std,
                     "model_config": payload.get("model_config"),
                     "vocab_stoi": payload.get("vocab_stoi"),
                     "cmm_model_state_dict": cmm_model.state_dict(),
@@ -201,8 +212,11 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                     "write_noise_group": base_condition,
                     "write_noise_std": str(write_noise_std),
                     "seed": str(seed),
+                    "tile_shape": "128x128",
                     "cell_bits": "0",
-                    "read_noise_std": "0.0",
+                    "adc_resolution": "0",
+                    "dac_resolution": "0",
+                    "read_noise_std": "0.0001",
                     "num_cmm_linear": str(num_cmm_linear),
                     "checkpoint": str(out_path),
                 }

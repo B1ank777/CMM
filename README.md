@@ -8,7 +8,7 @@
 
 LSTM-CMM 已在先前工作中被验证为一种可行的架构，但 Transformer 作为当前 NLP/CV 领域的主流架构，其大规模线性投影（Q/K/V/O、FFN）是否能被 CMM 有效支持？写入误差对 self-attention 和 FFN 两部分的影响孰重孰轻？这些问题尚未被系统性研究。
 
-本项目旨在 **将 Transformer 解码器中的线性层映射到 CMM crossbar 上**，通过 CrossSim 进行误差注入仿真，评估不同写入精度（it-10 ~ it-6）、ADC/DAC 分辨率、读噪声和阵列规模下的模型性能退化，为硬件设计提供指导。此外，项目现已支持 **CMM → CrossSim** 两级映射：先用论文式 `CMMLinear` / CMM 参数对 `nn.Linear` 建模，再将其写入 CrossSim 器件路径，以比较”等效模型”与”真实 crossbar 仿真”下非理想效应的差异。项目还包含 **SPICE 级能耗验证**：从 CMM-CrossSim 真实电导和 COCO 激活值估计 decoder crossbar core 读能耗，并与数字 MAC 参考能耗对比。
+本项目旨在 **将 Transformer 解码器中的线性层映射到 CMM crossbar 上**，通过 CrossSim 进行误差注入仿真，评估不同写入噪声强度（0 到 1e-2）、ADC/DAC 分辨率、读噪声和阵列规模下的模型性能退化，为硬件设计提供指导。此外，项目现已支持 **CMM → CrossSim** 两级映射：先用论文式 `CMMLinear` / CMM 参数对 `nn.Linear` 建模，再将其写入 CrossSim 器件路径，以比较”等效模型”与”真实 crossbar 仿真”下非理想效应的差异。项目还包含 **SPICE 级能耗验证**：从 CMM-CrossSim 真实电导和 COCO 激活值估计 decoder crossbar core 读能耗，并与数字 MAC 参考能耗对比。
 
 ## 2. 系统架构
 
@@ -101,7 +101,7 @@ W_real → W_mapped → W_written = W_real + write_noise
 
 | 实验维度 | 默认值 | 扫描范围 |
 |----------|--------|----------|
-| 写入噪声 (write_noise_std) | 0 | it-10 (1e-6) ~ it-6 (1e-2) |
+| 写入噪声 (write_noise_std) | 0 | 0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2 |
 | 读噪声 (read_noise_std) | 0 | 0 ~ 1e-2 |
 | ADC 分辨率 | 10 bit | 4 ~ 12 bit |
 | DAC 分辨率 | 12 bit | 4 ~ 12 bit |
@@ -376,11 +376,10 @@ python -m src.map_crosssim --checkpoint checkpoints/caption_transformer_epoch_10
 ### 消融实验
 
 ```bash
-# 写入噪声消融（it-10 ~ it-6），中等非理想 ADC/DAC
+# 写入噪声消融：固定 ADC/DAC=0/0、read_noise=1e-4，只扫描 write_noise
 python -m src.test_crosssim_write_noise_conditions \
     --checkpoint checkpoints/caption_transformer_epoch_10.pt \
-    --output-dir checkpoints/crosssim_write_noise_conditions \
-    --save-baseline-crosssim
+    --output-dir checkpoints/crosssim_write_noise_conditions
 
 # 读噪声消融
 python -m src.test_crosssim_read_noise_conditions \
@@ -597,7 +596,7 @@ python experiments/spice/test_extract_conductance.py
 - [x] CrossSim 忆阻器交叉阵列映射（替换 MemTorch）
 - [x] 评估脚本（BLEU / METEOR / ROUGE）
 - [x] 单图描述生成脚本
-- [x] 写入噪声消融实验（it-10 ~ it-6）
+- [x] 写入噪声消融实验（0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2）
 - [x] 读噪声消融实验
 - [x] ADC 分辨率消融实验
 - [x] DAC 分辨率消融实验

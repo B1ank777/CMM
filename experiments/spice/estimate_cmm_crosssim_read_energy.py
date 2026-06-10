@@ -35,7 +35,14 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from run_crossbar_read import run_matrix_experiment
 from src.evaluate_crosssim import build_val_loader, build_vocab_from_payload_or_data
-from src.map_crosssim import build_crosssim_model, build_model_from_payload, freeze_encoder, load_checkpoint
+from src.map_crosssim import (
+    build_crosssim_model,
+    build_model_from_crosssim_payload,
+    build_model_from_payload,
+    freeze_encoder,
+    load_checkpoint,
+    synchronize_crosssim_cores,
+)
 
 
 ACTIVATION_SCALE = "per_vector"
@@ -44,6 +51,7 @@ EXCLUDED = "adc,dac,sense,digital_bias,layernorm,softmax,residual,encoder"
 DEFAULT_DIGITAL_MAC_ENERGY_PJ = 1.0
 DEFAULT_BASELINE = Path("checkpoints/caption_transformer_epoch_10.pt")
 DEFAULT_CMM_CROSSSIM = Path("checkpoints/caption_transformer_array-128x128_cmm_crosssim.pt")
+DEFAULT_CROSSSIM_ONLY = Path("checkpoints/caption_transformer_crosssim_decoder.pt")
 DEFAULT_OUTPUT_DIR = Path("experiments/spice/results/cmm_crosssim_read_energy")
 
 
@@ -109,6 +117,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Estimate CMM-CrossSim crossbar core read energy with ngspice validation.")
     parser.add_argument("--baseline-checkpoint", type=Path, default=DEFAULT_BASELINE, help="数字基线 checkpoint")
     parser.add_argument("--cmm-crosssim-checkpoint", type=Path, default=DEFAULT_CMM_CROSSSIM, help="CMM-CrossSim checkpoint")
+    parser.add_argument("--crosssim-only-checkpoint", type=Path, default=DEFAULT_CROSSSIM_ONLY, help="CrossSim-only decoder checkpoint")
+    parser.add_argument("--skip-crosssim-only", action="store_true", help="不计算普通 CrossSim-only 能耗对照")
     parser.add_argument("--coco-root", type=Path, default=None, help="COCO 根目录；默认复用项目 loader 默认值")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="结果输出目录")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="推理设备")
@@ -132,14 +142,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_cmm_crosssim_model(args: argparse.Namespace, device: torch.device) -> tuple[nn.Module, dict[str, Any], dict[str, Any]]:
-    """加载 baseline 结构并按 CMM-CrossSim checkpoint 元数据重建 AnalogLinear 模型。"""
-    payload, state_dict = load_checkpoint(args.baseline_checkpoint, map_location="cpu")
+def load_baseline_template(checkpoint: Path, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
+    """加载原始数字模型结构，作为 CrossSim / CMM-CrossSim 重建模板。"""
+    payload, state_dict = load_checkpoint(checkpoint, map_location="cpu")
     base_model = build_model_from_payload(payload)
     base_model.load_state_dict(state_dict)
     freeze_encoder(base_model)
     base_model.to(device)
     base_model.eval()
+    return base_model, payload
+
+
+def load_cmm_crosssim_model(args: argparse.Namespace, device: torch.device) -> tuple[nn.Module, dict[str, Any], dict[str, Any]]:
+    """加载 baseline 结构并按 CMM-CrossSim checkpoint 元数据重建 AnalogLinear 模型。"""
+    base_model, payload = load_baseline_template(args.baseline_checkpoint, device)
 
     crosssim_payload = torch.load(args.cmm_crosssim_checkpoint, map_location="cpu")
     if crosssim_payload.get("format") != "cmm_crosssim_v1":
@@ -177,6 +193,27 @@ def load_cmm_crosssim_model(args: argparse.Namespace, device: torch.device) -> t
     model.to(device)
     model.eval()
     return model, payload, crosssim_payload
+
+
+def load_crosssim_only_model(args: argparse.Namespace, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
+    """加载普通 CrossSim-only decoder 映射模型，用作 CMM 能耗对照。"""
+    base_model, _payload = load_baseline_template(args.baseline_checkpoint, device)
+    crosssim_payload = torch.load(args.crosssim_only_checkpoint, map_location="cpu")
+    if "crosssim_args" not in crosssim_payload:
+        raise ValueError("CrossSim-only checkpoint missing crosssim_args.")
+    if "crosssim_model_state_dict" not in crosssim_payload:
+        raise ValueError("CrossSim-only checkpoint missing crosssim_model_state_dict.")
+    crosssim_args = dict(crosssim_payload["crosssim_args"])
+    crosssim_args["use_gpu"] = bool(args.use_gpu or device.type == "cuda")
+    if crosssim_args["use_gpu"] and device.type != "cuda":
+        raise RuntimeError("--use-gpu requires --device cuda.")
+    model = build_model_from_crosssim_payload(base_model, crosssim_args, device)
+    model.load_state_dict(crosssim_payload["crosssim_model_state_dict"])
+    # 中文注释：load_state_dict 后必须把 PyTorch 权重同步回 CrossSim core，随后才能读取真实 matrix。
+    synchronize_crosssim_cores(model)
+    model.to(device)
+    model.eval()
+    return model, crosssim_payload
 
 
 def is_mapped_linear(name: str, module: nn.Module) -> bool:
@@ -374,6 +411,39 @@ def run_activation_capture(
     return processed
 
 
+def estimate_read_energy_for_model(
+    model: nn.Module,
+    loader,
+    device: torch.device,
+    r_on: float,
+    r_off: float,
+    pulse_ns: float,
+    vread: float,
+    limit_batches: int,
+) -> tuple[dict[str, TileRecord], dict[str, DigitalMacRecord], int, dict[str, int]]:
+    """对一个 mapped CrossSim 模型统计 activation-aware read energy。"""
+    records = extract_tile_records(model, r_on=r_on, r_off=r_off)
+    digital_mac_records = extract_digital_mac_records(model)
+    handles, token_counter = register_activation_hooks(
+        model,
+        records,
+        digital_mac_records=digital_mac_records,
+        pulse_ns=pulse_ns,
+        vread=vread,
+    )
+    try:
+        processed_images = run_activation_capture(
+            model=model,
+            loader=loader,
+            device=device,
+            limit_batches=limit_batches,
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+    return records, digital_mac_records, processed_images, token_counter
+
+
 def select_validation_tiles(records: dict[str, TileRecord]) -> dict[str, TileRecord]:
     """按统计窗口内 tile_total_energy 选择 high / median / low 非零能耗 tile。"""
     nonzero = [record for record in records.values() if record.tile_total_energy_j > 0.0]
@@ -406,6 +476,7 @@ def write_summary_csv(
     records: dict[str, TileRecord],
     digital_mac_records: dict[str, DigitalMacRecord],
     metadata: dict[str, Any],
+    crosssim_only_records: dict[str, TileRecord] | None = None,
 ) -> None:
     group_energy: dict[str, float] = defaultdict(float)
     group_power: dict[str, float] = defaultdict(float)
@@ -423,9 +494,36 @@ def write_summary_csv(
     for record in digital_mac_records.values():
         group_macs[record.group] += record.total_macs
     total_macs = sum(record.total_macs for record in digital_mac_records.values())
+
+    crosssim_group_energy: dict[str, float] = defaultdict(float)
+    crosssim_group_power: dict[str, float] = defaultdict(float)
+    crosssim_group_read_current: dict[str, float] = defaultdict(float)
+    if crosssim_only_records is not None:
+        for record in crosssim_only_records.values():
+            crosssim_group_energy[record.group] += record.tile_total_energy_j
+            crosssim_group_power[record.group] += record.tile_total_power_w
+            crosssim_group_read_current[record.group] += record.tile_total_read_current_a
+    crosssim_total_energy = (
+        sum(record.tile_total_energy_j for record in crosssim_only_records.values())
+        if crosssim_only_records is not None
+        else 0.0
+    )
+    crosssim_total_power = (
+        sum(record.tile_total_power_w for record in crosssim_only_records.values())
+        if crosssim_only_records is not None
+        else 0.0
+    )
+    crosssim_total_read_current = (
+        sum(record.tile_total_read_current_a for record in crosssim_only_records.values())
+        if crosssim_only_records is not None
+        else 0.0
+    )
     rows = []
     for group in ["self_attn", "cross_attn", "ffn", "output_proj", "full_decoder"]:
         cmm_energy = total_energy if group == "full_decoder" else group_energy.get(group, 0.0)
+        crosssim_energy = (
+            crosssim_total_energy if group == "full_decoder" else crosssim_group_energy.get(group, 0.0)
+        )
         digital_macs = total_macs if group == "full_decoder" else group_macs.get(group, 0)
         digital_energy = digital_energy_j(digital_macs, mac_energy_pj)
         rows.append(
@@ -437,6 +535,24 @@ def write_summary_csv(
                 "total_vector_read_current_a": total_read_current
                 if group == "full_decoder"
                 else group_read_current.get(group, 0.0),
+                "crosssim_only_energy_j": crosssim_energy if crosssim_only_records is not None else "",
+                "crosssim_only_total_vector_power_w": (
+                    crosssim_total_power
+                    if group == "full_decoder"
+                    else crosssim_group_power.get(group, 0.0)
+                )
+                if crosssim_only_records is not None
+                else "",
+                "crosssim_only_total_vector_read_current_a": (
+                    crosssim_total_read_current
+                    if group == "full_decoder"
+                    else crosssim_group_read_current.get(group, 0.0)
+                )
+                if crosssim_only_records is not None
+                else "",
+                "cmm_to_crosssim_only_energy_ratio": (
+                    cmm_energy / crosssim_energy if crosssim_only_records is not None and crosssim_energy > 0 else ""
+                ),
                 "digital_mac_count": digital_macs,
                 "digital_mac_energy_j": digital_energy,
                 "cmm_read_to_digital_mac_energy_ratio": cmm_energy / digital_energy if digital_energy > 0 else "",
@@ -578,8 +694,6 @@ def main() -> None:
     cmm_args = crosssim_payload["cmm_crosssim_args"]
     r_on = float(cmm_args.get("rmin", 1e3))
     r_off = float(cmm_args.get("rmax", 1e5))
-    records = extract_tile_records(model, r_on=r_on, r_off=r_off)
-    digital_mac_records = extract_digital_mac_records(model)
 
     if args.coco_root is None:
         from src.coco_preprocess.loader import DEFAULT_COCO_ROOT
@@ -597,24 +711,45 @@ def main() -> None:
         num_workers=args.num_workers,
         subset_size=args.limit,
     )
+    limit_batches = math.ceil(args.limit / max(args.batch_size, 1))
 
-    handles, token_counter = register_activation_hooks(
-        model,
-        records,
-        digital_mac_records=digital_mac_records,
+    records, digital_mac_records, processed_images, token_counter = estimate_read_energy_for_model(
+        model=model,
+        loader=loader,
+        device=device,
+        r_on=r_on,
+        r_off=r_off,
         pulse_ns=args.pulse_ns,
         vread=args.vread,
+        limit_batches=limit_batches,
     )
-    try:
-        processed_images = run_activation_capture(
-            model=model,
-            loader=loader,
-            device=device,
-            limit_batches=math.ceil(args.limit / max(args.batch_size, 1)),
+    crosssim_only_records: dict[str, TileRecord] | None = None
+    crosssim_only_ranks: dict[str, TileRecord] = {}
+    crosssim_only_processed_images = 0
+    crosssim_only_token_counter = {"count": 0}
+    if not args.skip_crosssim_only:
+        # 中文注释：释放 CMM 模型后再加载 CrossSim-only，降低大 checkpoint 同时驻留的内存压力。
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        crosssim_only_model, crosssim_only_payload = load_crosssim_only_model(args, device)
+        crosssim_only_args = crosssim_only_payload["crosssim_args"]
+        crosssim_only_records, _crosssim_only_mac_records, crosssim_only_processed_images, crosssim_only_token_counter = (
+            estimate_read_energy_for_model(
+                model=crosssim_only_model,
+                loader=loader,
+                device=device,
+                r_on=float(crosssim_only_args.get("rmin", 1e3)),
+                r_off=float(crosssim_only_args.get("rmax", 1e5)),
+                pulse_ns=args.pulse_ns,
+                vread=args.vread,
+                limit_batches=limit_batches,
+            )
         )
-    finally:
-        for handle in handles:
-            handle.remove()
+        crosssim_only_ranks = select_validation_tiles(crosssim_only_records)
+        del crosssim_only_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     ranks = select_validation_tiles(records)
     activation_vectors_per_tile = max((record.vector_count for record in records.values()), default=0)
@@ -624,12 +759,17 @@ def main() -> None:
         "excluded": EXCLUDED,
         "baseline_checkpoint": str(args.baseline_checkpoint),
         "cmm_crosssim_checkpoint": str(args.cmm_crosssim_checkpoint),
+        "crosssim_only_checkpoint": str(args.crosssim_only_checkpoint) if not args.skip_crosssim_only else "",
         "vread_v": args.vread,
         "pulse_ns": args.pulse_ns,
         "sample_limit": args.limit,
         "processed_images": processed_images,
+        "crosssim_only_processed_images": crosssim_only_processed_images if not args.skip_crosssim_only else "",
         "activation_vectors_per_tile": activation_vectors_per_tile,
         "token_vectors_seen_per_layer_sum": token_counter["count"],
+        "crosssim_only_token_vectors_seen_per_layer_sum": (
+            crosssim_only_token_counter["count"] if not args.skip_crosssim_only else ""
+        ),
         "r_on_ohm": r_on,
         "r_off_ohm": r_off,
         "tile_shape": "x".join(str(v) for v in cmm_args.get("tile_shape", (128, 128))),
@@ -642,8 +782,21 @@ def main() -> None:
         "digital_mac_model": "configurable_reference",
     }
 
-    write_summary_csv(args.output_dir / "summary.csv", records, digital_mac_records, metadata)
+    write_summary_csv(
+        args.output_dir / "summary.csv",
+        records,
+        digital_mac_records,
+        metadata,
+        crosssim_only_records=crosssim_only_records,
+    )
     write_tile_detail_csv(args.output_dir / "tile_detail.csv", records, ranks, metadata)
+    if crosssim_only_records is not None:
+        write_tile_detail_csv(
+            args.output_dir / "crosssim_only_tile_detail.csv",
+            crosssim_only_records,
+            crosssim_only_ranks,
+            metadata,
+        )
     write_digital_mac_reference_csv(args.output_dir / "digital_mac_reference.csv", digital_mac_records, metadata)
 
     spice_rows: list[dict[str, Any]] = []
@@ -651,7 +804,7 @@ def main() -> None:
         spice_rows = run_spice_validation(ranks, args, metadata)
         write_dict_rows(args.output_dir / "spice_validation.csv", spice_rows)
     else:
-        write_dict_rows(args.output_dir / "spice_validation.csv", [])
+        (args.output_dir / "spice_validation.csv").write_text("", encoding="utf-8")
 
     manifest = {
         "metadata": metadata,
@@ -660,6 +813,9 @@ def main() -> None:
         "outputs": {
             "summary_csv": str(args.output_dir / "summary.csv"),
             "tile_detail_csv": str(args.output_dir / "tile_detail.csv"),
+            "crosssim_only_tile_detail_csv": str(args.output_dir / "crosssim_only_tile_detail.csv")
+            if crosssim_only_records is not None
+            else "",
             "digital_mac_reference_csv": str(args.output_dir / "digital_mac_reference.csv"),
             "spice_validation_csv": str(args.output_dir / "spice_validation.csv"),
         },
@@ -667,11 +823,20 @@ def main() -> None:
     (args.output_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     total_energy = sum(record.tile_total_energy_j for record in records.values())
+    total_crosssim_only_energy = (
+        sum(record.tile_total_energy_j for record in crosssim_only_records.values())
+        if crosssim_only_records is not None
+        else 0.0
+    )
     total_digital_macs = sum(record.total_macs for record in digital_mac_records.values())
     total_digital_energy = digital_energy_j(total_digital_macs, args.digital_mac_energy_pj)
     print(f"mapped tiles: {len(records)}")
     print(f"processed images: {processed_images}")
     print(f"full decoder energy_j: {total_energy:.6e}")
+    if crosssim_only_records is not None:
+        ratio = total_energy / total_crosssim_only_energy if total_crosssim_only_energy > 0 else float("nan")
+        print(f"crosssim-only full decoder energy_j: {total_crosssim_only_energy:.6e}")
+        print(f"cmm/crosssim-only energy ratio: {ratio:.6e}")
     print(f"digital mac count: {total_digital_macs}")
     print(f"digital mac reference energy_j: {total_digital_energy:.6e}")
     print(f"summary: {args.output_dir / 'summary.csv'}")

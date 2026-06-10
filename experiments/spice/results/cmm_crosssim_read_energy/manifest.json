@@ -5,12 +5,15 @@
     "excluded": "adc,dac,sense,digital_bias,layernorm,softmax,residual,encoder",
     "baseline_checkpoint": "checkpoints\\caption_transformer_epoch_10.pt",
     "cmm_crosssim_checkpoint": "checkpoints\\caption_transformer_array-128x128_cmm_crosssim.pt",
+    "crosssim_only_checkpoint": "checkpoints\\caption_transformer_crosssim_decoder.pt",
     "vread_v": 0.1,
     "pulse_ns": 10.0,
-    "sample_limit": 16,
-    "processed_images": 16,
-    "activation_vectors_per_tile": 784,
-    "token_vectors_seen_per_layer_sum": 6162,
+    "sample_limit": 200,
+    "processed_images": 200,
+    "crosssim_only_processed_images": 200,
+    "activation_vectors_per_tile": 9800,
+    "token_vectors_seen_per_layer_sum": 76192,
+    "crosssim_only_token_vectors_seen_per_layer_sum": 76192,
     "r_on_ohm": 1000.0,
     "r_off_ohm": 100000.0,
     "tile_shape": "128x128",
@@ -19,18 +22,19 @@
     "read_noise_std": 0.0001,
     "write_noise_std": 0.0001,
     "digital_reference_scope": "same_decoder_mapped_linear_mac_only",
-    "digital_mac_energy_pj": 1.0,
+    "digital_mac_energy_pj": 0.9,
     "digital_mac_model": "configurable_reference"
   },
   "num_tiles": 532,
   "selected_tiles": {
     "low": "layers.0.ffn.3|r0c0|neg",
-    "median": "output_proj|r30c0|neg",
-    "high": "layers.1.cross_attn.v_proj|r0c0|neg"
+    "median": "output_proj|r35c0|neg",
+    "high": "layers.1.cross_attn.v_proj|r0c1|pos"
   },
   "outputs": {
     "summary_csv": "experiments\\spice\\results\\cmm_crosssim_read_energy\\summary.csv",
     "tile_detail_csv": "experiments\\spice\\results\\cmm_crosssim_read_energy\\tile_detail.csv",
+    "crosssim_only_tile_detail_csv": "experiments\\spice\\results\\cmm_crosssim_read_energy\\crosssim_only_tile_detail.csv",
     "digital_mac_reference_csv": "experiments\\spice\\results\\cmm_crosssim_read_energy\\digital_mac_reference.csv",
     "spice_validation_csv": "experiments\\spice\\results\\cmm_crosssim_read_energy\\spice_validation.csv"
   }
