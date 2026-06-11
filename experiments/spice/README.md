@@ -7,8 +7,9 @@
 - 输出列端为理想 0 V 虚地。
 - 暂时忽略线阻、寄生电容、selector、sense amplifier 和驱动器内阻。
 - 基础公式：`P(t) = VDD * I_total(t)`，`E = integral(P(t) dt)`。
-- 主实验能耗范围：`energy_scope=crossbar_core_read_only`。
-- 排除项：`adc,dac,sense,digital_bias,layernorm,softmax,residual,encoder`。
+- 主实验能耗范围：`energy_scope=peripheral_aware_read_energy`。
+- 主能耗公式：`energy_j = core_read_energy_j + adc_energy_j + dac_energy_j + digital_accum_energy_j + bias_energy_j`。
+- 仍未计入项：`sense,layernorm,softmax,residual,encoder`。
 
 ## 实验 A：基础 Crossbar 读功耗
 
@@ -46,14 +47,17 @@ python experiments/spice/sweep_ron_roff_cell_state.py --n 32 --vread 0.2 --pulse
 ```powershell
 conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py --limit 1 --batch-size 1 --device cpu --skip-ngspice
 conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py --limit 16 --batch-size 1 --device cuda --use-gpu
+conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py --limit 1 --batch-size 1 --device cpu --skip-ngspice --adc-energy-pj-per-conv 1.0 --dac-energy-pj-per-conv 0.1 --digital-mac-energy-pj 0.9 --peripheral-energy-source "parameterized_literature_model"
 ```
 
 核心口径：
 
 - CMM-CrossSim 和 CrossSim-only 都统计同一 decoder mapped Linear scope。
 - 两者使用同一 COCO validation subset、同一 `Vread/pulse_ns`、同一 `activation_scale=per_vector`。
-- CrossSim-only 用于回答：加入 CMM 后，相对普通 CrossSim 映射的 read energy 变化是多少。
-- 数字 MAC 对照仍是理论参考线：`--digital-mac-energy-pj 1.0` 表示 `1.0 pJ/MAC`。
+- CMM-CrossSim 和 CrossSim-only 使用同一 ADC/DAC/digital/bias 参数化外围能耗模型，保证能耗对比口径一致。
+- CrossSim-only 用于回答：加入 CMM 后，相对普通 CrossSim 映射的 peripheral-aware energy 变化是多少。
+- 数字 MAC 对照使用同一批 decoder mapped Linear 的 MAC 数：`--digital-mac-energy-pj 1.0` 表示 `1.0 pJ/MAC`，不包含 encoder、LayerNorm、softmax、residual。
+- `--adc-energy-pj-per-conv` 和 `--dac-energy-pj-per-conv` 默认为 0；论文正式数值应显式传入，并用 `--peripheral-energy-source` 记录来源。
 
 CrossSim core 访问路径：
 
@@ -85,26 +89,30 @@ experiments/spice/results/cmm_crosssim_read_energy/
 
 主要输出：
 
-- `summary.csv`：full decoder 与 self-attn/cross-attn/FFN/output projection 分组能耗。
-- `tile_detail.csv`：CMM-CrossSim 每个 CrossSim core tile 的电阻、能耗、rank。
-- `crosssim_only_tile_detail.csv`：普通 CrossSim-only 对照的每个 tile 能耗。
+- `summary.csv`：full decoder 与 self-attn/cross-attn/FFN/output projection 分组 peripheral-aware 能耗。
+- `tile_detail.csv`：CMM-CrossSim 每个 CrossSim core tile 的电阻、core/ADC/DAC/digital/bias 分项、rank。
+- `crosssim_only_tile_detail.csv`：普通 CrossSim-only 对照的每个 tile 分项能耗。
 - `digital_mac_reference.csv`：同一 mapped decoder Linear 的数字 MAC 数和参考能耗。
-- `spice_validation.csv`：CMM-CrossSim high/median/low 代表 tile 的解析能量与 ngspice 积分能量对比。
+- `spice_validation.csv`：CMM-CrossSim high/median/low 代表 tile 的 core read 解析能量与 ngspice 积分能量对比。
 - `spice_validation/`：代表 tile 的 `.cir/.dat/.csv/.log`。
 
 `summary.csv` 中与对照相关的关键字段：
 
-- `energy_j`：CMM-CrossSim read energy。
-- `crosssim_only_energy_j`：普通 CrossSim-only read energy。
+- `energy_j`：CMM-CrossSim peripheral-aware total energy。
+- `core_read_energy_j` / `adc_energy_j` / `dac_energy_j` / `digital_accum_energy_j` / `bias_energy_j`：CMM-CrossSim 分项能耗。
+- `crosssim_only_energy_j`：普通 CrossSim-only peripheral-aware total energy。
+- `crosssim_only_core_read_energy_j` / `crosssim_only_adc_energy_j` / `crosssim_only_dac_energy_j` / `crosssim_only_digital_accum_energy_j` / `crosssim_only_bias_energy_j`：CrossSim-only 分项能耗。
 - `cmm_to_crosssim_only_energy_ratio`：CMM-CrossSim / CrossSim-only。
 - `digital_mac_energy_j`：数字 MAC 理论参考能耗。
-- `cmm_read_to_digital_mac_energy_ratio`：CMM-CrossSim / 数字 MAC 理论参考。
+- `cmm_to_digital_mac_energy_ratio`：CMM-CrossSim / 数字 MAC 理论参考。
+- `crosssim_only_to_digital_mac_energy_ratio`：CrossSim-only / 数字 MAC 理论参考。
 
 ## SPICE 验证标准
 
 - 默认要求 `relative_error < 1e-4`。
 - 若包含 PULSE 上升/下降沿，允许 `relative_error < 1e-3`。
 - 每次验证记录 `tran_step_ns`、`pulse_rise_ns`、`pulse_fall_ns`。
+- SPICE 仅验证 crossbar core I²R 子项的解析公式和网表生成；最终 `energy_j` 还包含参数化 ADC/DAC 和可选数字项。
 
 ## 后续可扩展项
 
@@ -112,4 +120,4 @@ experiments/spice/results/cmm_crosssim_read_energy/
 - bitline/wordline 电容。
 - selector 或 transistor。
 - sense amplifier 输入电阻。
-- ADC/DAC/sense/digital peripheral energy。
+- sense amplifier 和驱动器能耗。

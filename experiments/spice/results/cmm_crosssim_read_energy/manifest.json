@@ -1,8 +1,8 @@
 {
   "metadata": {
     "activation_scale": "per_vector",
-    "energy_scope": "crossbar_core_read_only",
-    "excluded": "adc,dac,sense,digital_bias,layernorm,softmax,residual,encoder",
+    "energy_scope": "peripheral_aware_read_energy",
+    "excluded": "sense,layernorm,softmax,residual,encoder",
     "baseline_checkpoint": "checkpoints\\caption_transformer_epoch_10.pt",
     "cmm_crosssim_checkpoint": "checkpoints\\caption_transformer_array-128x128_cmm_crosssim.pt",
     "crosssim_only_checkpoint": "checkpoints\\caption_transformer_crosssim_decoder.pt",
@@ -23,13 +23,29 @@
     "write_noise_std": 0.0001,
     "digital_reference_scope": "same_decoder_mapped_linear_mac_only",
     "digital_mac_energy_pj": 0.9,
-    "digital_mac_model": "configurable_reference"
+    "digital_mac_model": "configurable_reference",
+    "adc_energy_pj_per_conv": 1.0,
+    "dac_energy_pj_per_conv": 0.1,
+    "digital_accum_energy_pj_per_op": 0.0009,
+    "bias_energy_pj_per_op": 0.0009,
+    "peripheral_energy_source": "parameterized_literature_model"
   },
   "num_tiles": 532,
   "selected_tiles": {
     "low": "layers.0.ffn.3|r0c0|neg",
     "median": "output_proj|r35c0|neg",
     "high": "layers.1.cross_attn.v_proj|r0c1|pos"
+  },
+  "energy_model": {
+    "scope": "peripheral_aware_read_energy",
+    "formula": "core_read_energy_j + adc_energy_j + dac_energy_j + digital_accum_energy_j + bias_energy_j",
+    "adc_energy_pj_per_conv": 1.0,
+    "dac_energy_pj_per_conv": 0.1,
+    "digital_accum_energy_pj_per_op": 0.0009,
+    "bias_energy_pj_per_op": 0.0009,
+    "digital_mac_energy_pj": 0.9,
+    "source": "parameterized_literature_model",
+    "digital_reference_scope": "same_decoder_mapped_linear_mac_only"
   },
   "outputs": {
     "summary_csv": "experiments\\spice\\results\\cmm_crosssim_read_energy\\summary.csv",

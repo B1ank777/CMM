@@ -1,12 +1,14 @@
-"""估计 CMM-CrossSim decoder crossbar core read energy。
+"""估计 CMM-CrossSim decoder peripheral-aware read energy。
 
 运行示例:
     conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py --limit 1 --batch-size 1 --device cpu
     conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py --limit 16 --batch-size 1 --device cuda --use-gpu
+    conda run -n mem python experiments/spice/estimate_cmm_crosssim_read_energy.py --limit 1 --batch-size 1 --device cpu --skip-ngspice --adc-energy-pj-per-conv 1.0 --dac-energy-pj-per-conv 0.1 --digital-mac-energy-pj 0.9 --peripheral-energy-source "parameterized_literature_model"
 
 说明:
-    本脚本只统计 crossbar core read energy，不包含 ADC/DAC/sense/digital bias/
-    LayerNorm/softmax/residual/encoder 等外围或数字模块能耗。
+    主能耗口径为 crossbar core read energy + ADC model + DAC model +
+    optional digital accumulation / bias energy。数字 MAC 对照只覆盖同一批
+    decoder mapped Linear，不包含 encoder、LayerNorm、softmax、residual。
 """
 
 from __future__ import annotations
@@ -46,8 +48,8 @@ from src.map_crosssim import (
 
 
 ACTIVATION_SCALE = "per_vector"
-ENERGY_SCOPE = "crossbar_core_read_only"
-EXCLUDED = "adc,dac,sense,digital_bias,layernorm,softmax,residual,encoder"
+ENERGY_SCOPE = "peripheral_aware_read_energy"
+EXCLUDED = "sense,layernorm,softmax,residual,encoder"
 DEFAULT_DIGITAL_MAC_ENERGY_PJ = 1.0
 DEFAULT_BASELINE = Path("checkpoints/caption_transformer_epoch_10.pt")
 DEFAULT_CMM_CROSSSIM = Path("checkpoints/caption_transformer_array-128x128_cmm_crosssim.pt")
@@ -113,8 +115,54 @@ class DigitalMacRecord:
         return self.vector_count * self.macs_per_vector
 
 
+@dataclass
+class PeripheralEnergyModel:
+    """参数化外围能耗模型；单位统一为 pJ/op 或 pJ/conversion。"""
+
+    adc_energy_pj_per_conv: float
+    dac_energy_pj_per_conv: float
+    digital_accum_energy_pj_per_op: float
+    bias_energy_pj_per_op: float
+
+
+@dataclass
+class EnergyBreakdown:
+    """保存 core 与外围能耗分项，便于 summary 和 tile 明细复用。"""
+
+    core_read_energy_j: float = 0.0
+    adc_energy_j: float = 0.0
+    dac_energy_j: float = 0.0
+    digital_accum_energy_j: float = 0.0
+    bias_energy_j: float = 0.0
+    adc_conversions: float = 0.0
+    dac_conversions: float = 0.0
+    digital_accum_ops: float = 0.0
+    bias_ops: float = 0.0
+
+    @property
+    def total_energy_j(self) -> float:
+        return (
+            self.core_read_energy_j
+            + self.adc_energy_j
+            + self.dac_energy_j
+            + self.digital_accum_energy_j
+            + self.bias_energy_j
+        )
+
+    def add(self, other: "EnergyBreakdown") -> None:
+        self.core_read_energy_j += other.core_read_energy_j
+        self.adc_energy_j += other.adc_energy_j
+        self.dac_energy_j += other.dac_energy_j
+        self.digital_accum_energy_j += other.digital_accum_energy_j
+        self.bias_energy_j += other.bias_energy_j
+        self.adc_conversions += other.adc_conversions
+        self.dac_conversions += other.dac_conversions
+        self.digital_accum_ops += other.digital_accum_ops
+        self.bias_ops += other.bias_ops
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Estimate CMM-CrossSim crossbar core read energy with ngspice validation.")
+    parser = argparse.ArgumentParser(description="Estimate CMM-CrossSim peripheral-aware read energy with ngspice core validation.")
     parser.add_argument("--baseline-checkpoint", type=Path, default=DEFAULT_BASELINE, help="数字基线 checkpoint")
     parser.add_argument("--cmm-crosssim-checkpoint", type=Path, default=DEFAULT_CMM_CROSSSIM, help="CMM-CrossSim checkpoint")
     parser.add_argument("--crosssim-only-checkpoint", type=Path, default=DEFAULT_CROSSSIM_ONLY, help="CrossSim-only decoder checkpoint")
@@ -138,6 +186,26 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_DIGITAL_MAC_ENERGY_PJ,
         help="数字 MAC 能耗参考值，单位 pJ/MAC；默认仅作为可配置参考线",
+    )
+    parser.add_argument("--adc-energy-pj-per-conv", type=float, default=0.0, help="ADC 每次转换能耗，单位 pJ/conversion")
+    parser.add_argument("--dac-energy-pj-per-conv", type=float, default=0.0, help="DAC 每次转换能耗，单位 pJ/conversion")
+    parser.add_argument(
+        "--digital-accum-energy-pj-per-op",
+        type=float,
+        default=0.0,
+        help="tile partial sum 数字累加每次操作能耗，单位 pJ/op；0 表示不计入",
+    )
+    parser.add_argument(
+        "--bias-energy-pj-per-op",
+        type=float,
+        default=0.0,
+        help="bias 加法每次操作能耗，单位 pJ/op；0 表示不计入",
+    )
+    parser.add_argument(
+        "--peripheral-energy-source",
+        type=str,
+        default="not_specified",
+        help="ADC/DAC/digital/bias 参数来源说明，会写入 manifest 和 CSV",
     )
     return parser.parse_args()
 
@@ -471,22 +539,110 @@ def digital_energy_j(total_macs: int, mac_energy_pj: float) -> float:
     return float(total_macs) * mac_energy_pj * 1e-12
 
 
+def pj_to_j(value_pj: float) -> float:
+    """把 pJ 转换为 J。"""
+    return float(value_pj) * 1e-12
+
+
+def logical_tile_key(record: TileRecord) -> tuple[str, int, int]:
+    """同一个 logical tile 可能对应 balanced 正负两个物理 core。"""
+    return record.layer_name, record.core_row, record.core_col
+
+
+def representative_records_by_logical_tile(records: dict[str, TileRecord]) -> dict[tuple[str, int, int], TileRecord]:
+    """为每个 logical tile 选一个代表记录，外围 ADC/DAC 只在代表记录上计数。"""
+    polarity_order = {"single": 0, "pos": 1, "neg": 2}
+    representatives: dict[tuple[str, int, int], TileRecord] = {}
+    for record in records.values():
+        key = logical_tile_key(record)
+        current = representatives.get(key)
+        if current is None or polarity_order.get(record.polarity, 99) < polarity_order.get(current.polarity, 99):
+            representatives[key] = record
+    return representatives
+
+
+def compute_energy_breakdowns(
+    records: dict[str, TileRecord],
+    model: PeripheralEnergyModel,
+) -> dict[str, EnergyBreakdown]:
+    """计算 peripheral-aware 分项。
+
+    中文注释：core read energy 来自每个物理 core；ADC/DAC 和可选数字项按
+    logical tile 计数，避免 balanced 正负阵列把外围转换次数重复计算。
+    """
+    breakdowns = {
+        record.tile_id: EnergyBreakdown(core_read_energy_j=record.tile_total_energy_j)
+        for record in records.values()
+    }
+    representatives = representative_records_by_logical_tile(records)
+
+    layer_col_ids: dict[str, set[int]] = defaultdict(set)
+    for record in representatives.values():
+        layer_col_ids[record.layer_name].add(record.core_col)
+    layer_min_col = {layer: min(cols) for layer, cols in layer_col_ids.items() if cols}
+    layer_col_count = {layer: len(cols) for layer, cols in layer_col_ids.items()}
+
+    for record in representatives.values():
+        vector_count = float(record.vector_count)
+        input_width = float(record.col_end - record.col_start)
+        output_width = float(record.row_end - record.row_start)
+        breakdown = breakdowns[record.tile_id]
+
+        breakdown.adc_conversions = output_width * vector_count
+        breakdown.dac_conversions = input_width * vector_count
+        breakdown.adc_energy_j = breakdown.adc_conversions * pj_to_j(model.adc_energy_pj_per_conv)
+        breakdown.dac_energy_j = breakdown.dac_conversions * pj_to_j(model.dac_energy_pj_per_conv)
+
+        # partial-sum 累加和 bias 加法只按每个输出 row tile 计一次，挂到最小 col tile 的代表记录。
+        if record.core_col == layer_min_col.get(record.layer_name):
+            accum_per_output = max(layer_col_count.get(record.layer_name, 1) - 1, 0)
+            breakdown.digital_accum_ops = output_width * vector_count * float(accum_per_output)
+            breakdown.bias_ops = output_width * vector_count
+            breakdown.digital_accum_energy_j = breakdown.digital_accum_ops * pj_to_j(model.digital_accum_energy_pj_per_op)
+            breakdown.bias_energy_j = breakdown.bias_ops * pj_to_j(model.bias_energy_pj_per_op)
+
+    return breakdowns
+
+
+def sum_breakdowns(records: dict[str, TileRecord], breakdowns: dict[str, EnergyBreakdown], group: str) -> EnergyBreakdown:
+    """按 group 汇总分项；group=full_decoder 时汇总全部 mapped Linear。"""
+    total = EnergyBreakdown()
+    for record in records.values():
+        if group == "full_decoder" or record.group == group:
+            total.add(breakdowns[record.tile_id])
+    return total
+
+
+def breakdown_to_columns(prefix: str, breakdown: EnergyBreakdown) -> dict[str, float]:
+    """把能耗分项展开成 CSV 列。"""
+    return {
+        f"{prefix}core_read_energy_j": breakdown.core_read_energy_j,
+        f"{prefix}adc_energy_j": breakdown.adc_energy_j,
+        f"{prefix}dac_energy_j": breakdown.dac_energy_j,
+        f"{prefix}digital_accum_energy_j": breakdown.digital_accum_energy_j,
+        f"{prefix}bias_energy_j": breakdown.bias_energy_j,
+        f"{prefix}adc_conversions": breakdown.adc_conversions,
+        f"{prefix}dac_conversions": breakdown.dac_conversions,
+        f"{prefix}digital_accum_ops": breakdown.digital_accum_ops,
+        f"{prefix}bias_ops": breakdown.bias_ops,
+    }
+
+
 def write_summary_csv(
     path: Path,
     records: dict[str, TileRecord],
+    breakdowns: dict[str, EnergyBreakdown],
     digital_mac_records: dict[str, DigitalMacRecord],
     metadata: dict[str, Any],
     crosssim_only_records: dict[str, TileRecord] | None = None,
+    crosssim_only_breakdowns: dict[str, EnergyBreakdown] | None = None,
 ) -> None:
-    group_energy: dict[str, float] = defaultdict(float)
     group_power: dict[str, float] = defaultdict(float)
     group_read_current: dict[str, float] = defaultdict(float)
     for record in records.values():
-        group_energy[record.group] += record.tile_total_energy_j
         group_power[record.group] += record.tile_total_power_w
         group_read_current[record.group] += record.tile_total_read_current_a
 
-    total_energy = sum(record.tile_total_energy_j for record in records.values())
     total_power = sum(record.tile_total_power_w for record in records.values())
     total_read_current = sum(record.tile_total_read_current_a for record in records.values())
     mac_energy_pj = float(metadata["digital_mac_energy_pj"])
@@ -495,19 +651,12 @@ def write_summary_csv(
         group_macs[record.group] += record.total_macs
     total_macs = sum(record.total_macs for record in digital_mac_records.values())
 
-    crosssim_group_energy: dict[str, float] = defaultdict(float)
     crosssim_group_power: dict[str, float] = defaultdict(float)
     crosssim_group_read_current: dict[str, float] = defaultdict(float)
     if crosssim_only_records is not None:
         for record in crosssim_only_records.values():
-            crosssim_group_energy[record.group] += record.tile_total_energy_j
             crosssim_group_power[record.group] += record.tile_total_power_w
             crosssim_group_read_current[record.group] += record.tile_total_read_current_a
-    crosssim_total_energy = (
-        sum(record.tile_total_energy_j for record in crosssim_only_records.values())
-        if crosssim_only_records is not None
-        else 0.0
-    )
     crosssim_total_power = (
         sum(record.tile_total_power_w for record in crosssim_only_records.values())
         if crosssim_only_records is not None
@@ -520,44 +669,66 @@ def write_summary_csv(
     )
     rows = []
     for group in ["self_attn", "cross_attn", "ffn", "output_proj", "full_decoder"]:
-        cmm_energy = total_energy if group == "full_decoder" else group_energy.get(group, 0.0)
-        crosssim_energy = (
-            crosssim_total_energy if group == "full_decoder" else crosssim_group_energy.get(group, 0.0)
+        cmm_breakdown = sum_breakdowns(records, breakdowns, group)
+        cmm_energy = cmm_breakdown.total_energy_j
+        crosssim_breakdown = (
+            sum_breakdowns(crosssim_only_records, crosssim_only_breakdowns, group)
+            if crosssim_only_records is not None and crosssim_only_breakdowns is not None
+            else None
         )
+        crosssim_energy = crosssim_breakdown.total_energy_j if crosssim_breakdown is not None else 0.0
         digital_macs = total_macs if group == "full_decoder" else group_macs.get(group, 0)
         digital_energy = digital_energy_j(digital_macs, mac_energy_pj)
-        rows.append(
-            {
-                **metadata,
-                "group": group,
-                "energy_j": cmm_energy,
-                "total_vector_power_w": total_power if group == "full_decoder" else group_power.get(group, 0.0),
-                "total_vector_read_current_a": total_read_current
+        row = {
+            **metadata,
+            "group": group,
+            "energy_j": cmm_energy,
+            **breakdown_to_columns("", cmm_breakdown),
+            "total_vector_power_w": total_power if group == "full_decoder" else group_power.get(group, 0.0),
+            "total_vector_read_current_a": total_read_current
+            if group == "full_decoder"
+            else group_read_current.get(group, 0.0),
+            "crosssim_only_energy_j": crosssim_energy if crosssim_breakdown is not None else "",
+            **(
+                breakdown_to_columns("crosssim_only_", crosssim_breakdown)
+                if crosssim_breakdown is not None
+                else {
+                    "crosssim_only_core_read_energy_j": "",
+                    "crosssim_only_adc_energy_j": "",
+                    "crosssim_only_dac_energy_j": "",
+                    "crosssim_only_digital_accum_energy_j": "",
+                    "crosssim_only_bias_energy_j": "",
+                    "crosssim_only_adc_conversions": "",
+                    "crosssim_only_dac_conversions": "",
+                    "crosssim_only_digital_accum_ops": "",
+                    "crosssim_only_bias_ops": "",
+                }
+            ),
+            "crosssim_only_total_vector_power_w": (
+                crosssim_total_power
                 if group == "full_decoder"
-                else group_read_current.get(group, 0.0),
-                "crosssim_only_energy_j": crosssim_energy if crosssim_only_records is not None else "",
-                "crosssim_only_total_vector_power_w": (
-                    crosssim_total_power
-                    if group == "full_decoder"
-                    else crosssim_group_power.get(group, 0.0)
-                )
-                if crosssim_only_records is not None
-                else "",
-                "crosssim_only_total_vector_read_current_a": (
-                    crosssim_total_read_current
-                    if group == "full_decoder"
-                    else crosssim_group_read_current.get(group, 0.0)
-                )
-                if crosssim_only_records is not None
-                else "",
-                "cmm_to_crosssim_only_energy_ratio": (
-                    cmm_energy / crosssim_energy if crosssim_only_records is not None and crosssim_energy > 0 else ""
-                ),
-                "digital_mac_count": digital_macs,
-                "digital_mac_energy_j": digital_energy,
-                "cmm_read_to_digital_mac_energy_ratio": cmm_energy / digital_energy if digital_energy > 0 else "",
-            }
-        )
+                else crosssim_group_power.get(group, 0.0)
+            )
+            if crosssim_only_records is not None
+            else "",
+            "crosssim_only_total_vector_read_current_a": (
+                crosssim_total_read_current
+                if group == "full_decoder"
+                else crosssim_group_read_current.get(group, 0.0)
+            )
+            if crosssim_only_records is not None
+            else "",
+            "cmm_to_crosssim_only_energy_ratio": (
+                cmm_energy / crosssim_energy if crosssim_breakdown is not None and crosssim_energy > 0 else ""
+            ),
+            "digital_mac_count": digital_macs,
+            "digital_mac_energy_j": digital_energy,
+            "cmm_to_digital_mac_energy_ratio": cmm_energy / digital_energy if digital_energy > 0 else "",
+            "crosssim_only_to_digital_mac_energy_ratio": (
+                crosssim_energy / digital_energy if crosssim_breakdown is not None and digital_energy > 0 else ""
+            ),
+        }
+        rows.append(row)
     write_dict_rows(path, rows)
 
 
@@ -586,10 +757,17 @@ def write_digital_mac_reference_csv(
     write_dict_rows(path, rows)
 
 
-def write_tile_detail_csv(path: Path, records: dict[str, TileRecord], ranks: dict[str, TileRecord], metadata: dict[str, Any]) -> None:
+def write_tile_detail_csv(
+    path: Path,
+    records: dict[str, TileRecord],
+    breakdowns: dict[str, EnergyBreakdown],
+    ranks: dict[str, TileRecord],
+    metadata: dict[str, Any],
+) -> None:
     rank_by_id = {record.tile_id: rank for rank, record in ranks.items()}
     rows = []
     for record in sorted(records.values(), key=lambda item: item.tile_id):
+        breakdown = breakdowns[record.tile_id]
         rows.append(
             {
                 **metadata,
@@ -610,7 +788,8 @@ def write_tile_detail_csv(path: Path, records: dict[str, TileRecord], ranks: dic
                 "r_min_ohm": float(record.r_physical.min()),
                 "r_max_ohm": float(record.r_physical.max()),
                 "r_mean_ohm": float(record.r_physical.mean()),
-                "tile_total_energy_j": record.tile_total_energy_j,
+                "tile_total_energy_j": breakdown.total_energy_j,
+                **breakdown_to_columns("tile_", breakdown),
                 "tile_total_read_current_a": record.tile_total_read_current_a,
                 "tile_mean_vector_power_w": record.tile_mean_vector_power_w,
                 "tile_mean_vector_read_current_a": record.tile_mean_vector_read_current_a,
@@ -723,7 +902,15 @@ def main() -> None:
         vread=args.vread,
         limit_batches=limit_batches,
     )
+    peripheral_model = PeripheralEnergyModel(
+        adc_energy_pj_per_conv=args.adc_energy_pj_per_conv,
+        dac_energy_pj_per_conv=args.dac_energy_pj_per_conv,
+        digital_accum_energy_pj_per_op=args.digital_accum_energy_pj_per_op,
+        bias_energy_pj_per_op=args.bias_energy_pj_per_op,
+    )
+    breakdowns = compute_energy_breakdowns(records, peripheral_model)
     crosssim_only_records: dict[str, TileRecord] | None = None
+    crosssim_only_breakdowns: dict[str, EnergyBreakdown] | None = None
     crosssim_only_ranks: dict[str, TileRecord] = {}
     crosssim_only_processed_images = 0
     crosssim_only_token_counter = {"count": 0}
@@ -746,6 +933,7 @@ def main() -> None:
                 limit_batches=limit_batches,
             )
         )
+        crosssim_only_breakdowns = compute_energy_breakdowns(crosssim_only_records, peripheral_model)
         crosssim_only_ranks = select_validation_tiles(crosssim_only_records)
         del crosssim_only_model
         if torch.cuda.is_available():
@@ -780,20 +968,28 @@ def main() -> None:
         "digital_reference_scope": "same_decoder_mapped_linear_mac_only",
         "digital_mac_energy_pj": args.digital_mac_energy_pj,
         "digital_mac_model": "configurable_reference",
+        "adc_energy_pj_per_conv": args.adc_energy_pj_per_conv,
+        "dac_energy_pj_per_conv": args.dac_energy_pj_per_conv,
+        "digital_accum_energy_pj_per_op": args.digital_accum_energy_pj_per_op,
+        "bias_energy_pj_per_op": args.bias_energy_pj_per_op,
+        "peripheral_energy_source": args.peripheral_energy_source,
     }
 
     write_summary_csv(
         args.output_dir / "summary.csv",
         records,
+        breakdowns,
         digital_mac_records,
         metadata,
         crosssim_only_records=crosssim_only_records,
+        crosssim_only_breakdowns=crosssim_only_breakdowns,
     )
-    write_tile_detail_csv(args.output_dir / "tile_detail.csv", records, ranks, metadata)
+    write_tile_detail_csv(args.output_dir / "tile_detail.csv", records, breakdowns, ranks, metadata)
     if crosssim_only_records is not None:
         write_tile_detail_csv(
             args.output_dir / "crosssim_only_tile_detail.csv",
             crosssim_only_records,
+            crosssim_only_breakdowns,
             crosssim_only_ranks,
             metadata,
         )
@@ -810,6 +1006,17 @@ def main() -> None:
         "metadata": metadata,
         "num_tiles": len(records),
         "selected_tiles": {rank: record.tile_id for rank, record in ranks.items()},
+        "energy_model": {
+            "scope": ENERGY_SCOPE,
+            "formula": "core_read_energy_j + adc_energy_j + dac_energy_j + digital_accum_energy_j + bias_energy_j",
+            "adc_energy_pj_per_conv": args.adc_energy_pj_per_conv,
+            "dac_energy_pj_per_conv": args.dac_energy_pj_per_conv,
+            "digital_accum_energy_pj_per_op": args.digital_accum_energy_pj_per_op,
+            "bias_energy_pj_per_op": args.bias_energy_pj_per_op,
+            "digital_mac_energy_pj": args.digital_mac_energy_pj,
+            "source": args.peripheral_energy_source,
+            "digital_reference_scope": "same_decoder_mapped_linear_mac_only",
+        },
         "outputs": {
             "summary_csv": str(args.output_dir / "summary.csv"),
             "tile_detail_csv": str(args.output_dir / "tile_detail.csv"),
@@ -822,23 +1029,31 @@ def main() -> None:
     }
     (args.output_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    total_energy = sum(record.tile_total_energy_j for record in records.values())
-    total_crosssim_only_energy = (
-        sum(record.tile_total_energy_j for record in crosssim_only_records.values())
-        if crosssim_only_records is not None
-        else 0.0
+    total_breakdown = sum_breakdowns(records, breakdowns, "full_decoder")
+    total_energy = total_breakdown.total_energy_j
+    total_crosssim_only_breakdown = (
+        sum_breakdowns(crosssim_only_records, crosssim_only_breakdowns, "full_decoder")
+        if crosssim_only_records is not None and crosssim_only_breakdowns is not None
+        else None
     )
+    total_crosssim_only_energy = total_crosssim_only_breakdown.total_energy_j if total_crosssim_only_breakdown is not None else 0.0
     total_digital_macs = sum(record.total_macs for record in digital_mac_records.values())
     total_digital_energy = digital_energy_j(total_digital_macs, args.digital_mac_energy_pj)
     print(f"mapped tiles: {len(records)}")
     print(f"processed images: {processed_images}")
-    print(f"full decoder energy_j: {total_energy:.6e}")
-    if crosssim_only_records is not None:
+    print(f"full decoder peripheral-aware energy_j: {total_energy:.6e}")
+    print(f"  core_read_energy_j: {total_breakdown.core_read_energy_j:.6e}")
+    print(f"  adc_energy_j: {total_breakdown.adc_energy_j:.6e}")
+    print(f"  dac_energy_j: {total_breakdown.dac_energy_j:.6e}")
+    print(f"  digital_accum_energy_j: {total_breakdown.digital_accum_energy_j:.6e}")
+    print(f"  bias_energy_j: {total_breakdown.bias_energy_j:.6e}")
+    if total_crosssim_only_breakdown is not None:
         ratio = total_energy / total_crosssim_only_energy if total_crosssim_only_energy > 0 else float("nan")
-        print(f"crosssim-only full decoder energy_j: {total_crosssim_only_energy:.6e}")
+        print(f"crosssim-only full decoder peripheral-aware energy_j: {total_crosssim_only_energy:.6e}")
         print(f"cmm/crosssim-only energy ratio: {ratio:.6e}")
     print(f"digital mac count: {total_digital_macs}")
     print(f"digital mac reference energy_j: {total_digital_energy:.6e}")
+    print(f"cmm/digital mac energy ratio: {total_energy / total_digital_energy:.6e}")
     print(f"summary: {args.output_dir / 'summary.csv'}")
     print(f"tile detail: {args.output_dir / 'tile_detail.csv'}")
     print(f"digital MAC reference: {args.output_dir / 'digital_mac_reference.csv'}")
