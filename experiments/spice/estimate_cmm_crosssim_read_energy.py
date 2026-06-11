@@ -54,7 +54,7 @@ DEFAULT_DIGITAL_MAC_ENERGY_PJ = 1.0
 DEFAULT_BASELINE = Path("checkpoints/caption_transformer_epoch_10.pt")
 DEFAULT_CMM_CROSSSIM = Path("checkpoints/caption_transformer_array-128x128_cmm_crosssim.pt")
 DEFAULT_CROSSSIM_ONLY = Path("checkpoints/caption_transformer_crosssim_decoder.pt")
-DEFAULT_OUTPUT_DIR = Path("experiments/spice/results/cmm_crosssim_read_energy")
+DEFAULT_OUTPUT_DIR = Path("experiments/spice/results/cmm_crosssim_peripheral_energy")
 
 
 @dataclass
