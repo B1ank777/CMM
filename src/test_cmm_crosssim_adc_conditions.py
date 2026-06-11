@@ -12,7 +12,7 @@ write_noise_std=1e-4、cell_bits=0，用于正式观察 CrossSim 后端 ADC 量�
 #   :: 自定义 ADC 分辨率集合，跳过已存在的 checkpoint
 #   python -m src.test_cmm_crosssim_adc_conditions --checkpoint checkpoints\caption_transformer_epoch_10.pt ^
 #       --output-dir checkpoints\cmm_crosssim_adc_conditions ^
-#       --adc-resolutions 10,8,6,4 --skip-existing
+#       --adc-resolutions 10,8,6,4 --seed 42 --skip-existing
 #
 #   :: CPU 构建，仅映射 decoder layers
 #   python -m src.test_cmm_crosssim_adc_conditions --checkpoint checkpoints\caption_transformer_epoch_10.pt ^
@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
 import torch
 
 from .map_cmm_crosssim import build_cmm_crosssim_model, make_cmm_crosssim_args
@@ -73,6 +75,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--write-noise-std", type=float, default=1e-4, help="固定写入噪声强度")
     parser.add_argument("--bias-rows", type=int, default=0, help="bias 映射到阵列时使用的额外行数")
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子，保证 programming_error 抽样可复现",
+    )
+    parser.add_argument(
         "--adc-resolutions",
         type=str,
         default="12,10,8,6,4",
@@ -97,6 +105,15 @@ def condition_name(adc_bits: int) -> str:
     return "adc-ideal" if adc_bits == 0 else f"adc-{adc_bits}bit"
 
 
+def set_seed(seed: int) -> None:
+    """设置随机种子，保证 CrossSim programming_error 抽样可复现。"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
     """按 ADC 分辨率逐个构建 CMM-on-CrossSim checkpoint。"""
     device = torch.device(args.device)
@@ -117,6 +134,7 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
         # make_*_args 需要当前单个 adc_resolution，而不是 sweep 列表。
         args.adc_resolution = adc_bits
         args.programming_error_std = args.write_noise_std
+        set_seed(args.seed)
 
         condition = condition_name(adc_bits)
         out_path = args.output_dir / f"caption_transformer_{condition}_cmm_crosssim.pt"
@@ -128,6 +146,11 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                     "condition": condition,
                     "adc_resolution": str(adc_bits),
                     "dac_resolution": str(args.dac_resolution),
+                    "tile_shape": f"{args.tile_rows}x{args.tile_cols}",
+                    "cell_bits": str(args.cell_bits),
+                    "write_noise_std": str(args.write_noise_std),
+                    "read_noise_std": str(args.read_noise_std),
+                    "seed": str(args.seed),
                     "checkpoint": str(out_path),
                 }
             )
@@ -151,6 +174,7 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                 "adc_resolution": adc_bits,
                 "dac_resolution": args.dac_resolution,
                 "cell_bits": args.cell_bits,
+                "seed": args.seed,
                 "write_noise_std": args.write_noise_std,
                 "read_noise_std": args.read_noise_std,
                 "model_config": payload.get("model_config"),
@@ -172,6 +196,7 @@ def build_condition_models(args: argparse.Namespace) -> List[Dict[str, str]]:
                 "cell_bits": str(args.cell_bits),
                 "write_noise_std": str(args.write_noise_std),
                 "read_noise_std": str(args.read_noise_std),
+                "seed": str(args.seed),
                 "num_mapped_linear": str(num_mapped_linear),
                 "checkpoint": str(out_path),
             }

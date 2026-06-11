@@ -248,6 +248,8 @@ def main() -> None:
     rows: List[Dict[str, Any]] = []
 
     # 评测基线模型
+    # 基线模型也固定评测随机种子，避免 DataLoader worker 或 CUDA 状态导致微小漂移。
+    set_eval_seed(0)
     baseline_pred = output_dir / "baseline_predictions.json"
     build_predictions_json(
         base_model,
