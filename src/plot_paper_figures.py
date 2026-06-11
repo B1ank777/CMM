@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -16,6 +17,10 @@ import numpy as np
 
 
 BASELINE = {"bleu4": 0.2464, "cider": 0.8546}
+DEFAULT_CELL_METRICS_JSON = Path("checkpoints/cmm_crosssim_cell_bits_conditions/metrics_pycoco_batchsize64.json")
+DEFAULT_ARRAY_METRICS_JSON = Path(
+    "checkpoints/cmm_crosssim_array_size_conditions_adc0/metrics_pycoco_batchsize64_array.json"
+)
 
 # 真实实验结果，来源于 log/experiment_2026-05-25_cmm_dac_ablation.md。
 DAC_SWEEP = {
@@ -110,11 +115,12 @@ def configure_style() -> None:
     )
 
 
-def save_figure(fig: plt.Figure, output_dir: Path, stem: str, formats: list[str]) -> None:
+def save_figure(fig: plt.Figure, output_dir: Path, stem: str, formats: list[str], close: bool = True) -> None:
     """保存 PNG/PDF 等多种格式。"""
     for fmt in formats:
         fig.savefig(output_dir / f"{stem}.{fmt}", bbox_inches="tight")
-    plt.close(fig)
+    if close:
+        plt.close(fig)
 
 
 def plot_dual_metric_line(
@@ -128,10 +134,12 @@ def plot_dual_metric_line(
     log_x: bool = False,
     bleu4_err: list[float] | None = None,
     cider_err: list[float] | None = None,
+    baseline: dict[str, float] | None = None,
 ) -> tuple[plt.Axes, plt.Axes]:
     """在同一子图中用双纵轴画 BLEU-4 与 CIDEr。"""
     color_bleu = "#1f77b4"
     color_cider = "#d62728"
+    baseline = baseline or BASELINE
 
     ax2 = ax.twinx()
     if log_x:
@@ -166,8 +174,8 @@ def plot_dual_metric_line(
         **line_kwargs,
     )
 
-    ax.axhline(BASELINE["bleu4"], color=color_bleu, linestyle="--", linewidth=0.9, alpha=0.45)
-    ax2.axhline(BASELINE["cider"], color=color_cider, linestyle="--", linewidth=0.9, alpha=0.45)
+    ax.axhline(baseline["bleu4"], color=color_bleu, linestyle="--", linewidth=0.9, alpha=0.45)
+    ax2.axhline(baseline["cider"], color=color_cider, linestyle="--", linewidth=0.9, alpha=0.45)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("BLEU-4", color=color_bleu)
     ax2.set_ylabel("CIDEr", color=color_cider)
@@ -200,28 +208,78 @@ def make_fig4(output_dir: Path, formats: list[str]) -> None:
     save_figure(fig, output_dir, "fig4_dac_adc_precision_sensitivity", formats)
 
 
-def make_fig5(output_dir: Path, formats: list[str]) -> None:
+def read_metrics_json(path: Path) -> dict:
+    """读取 pycocoevalcap 指标 JSON。"""
+    with path.open(encoding="utf-8") as file:
+        return json.load(file)
+
+
+def extract_baseline(metrics_doc: dict) -> dict[str, float]:
+    """从 batchsize=64 指标文件中提取 baseline 虚线。"""
+    for row in metrics_doc["results"]:
+        if row["model"] == "baseline":
+            return {"bleu4": row["metrics"]["Bleu_4"], "cider": row["metrics"]["CIDEr"]}
+    raise ValueError("metrics JSON 中缺少 baseline 结果。")
+
+
+def extract_cell_bits_sweep(metrics_doc: dict) -> dict[str, list[float] | list[str]]:
+    """提取 ADC=0、batchsize=64 的 cell_bits 曲线。"""
+    rows = [row for row in metrics_doc["results"] if row["model"] != "baseline"]
+    rows.sort(key=lambda row: int(row["cell_bits"]))
+    return {
+        "bits": [int(row["cell_bits"]) for row in rows],
+        "labels": ["cont." if int(row["cell_bits"]) == 0 else str(row["cell_bits"]) for row in rows],
+        "bleu4": [row["metrics"]["Bleu_4"] for row in rows],
+        "cider": [row["metrics"]["CIDEr"] for row in rows],
+    }
+
+
+def extract_array_size_sweep(metrics_doc: dict) -> dict[str, list[float]]:
+    """提取 ADC=0、batchsize=64 的 array_size 曲线。"""
+    rows = [row for row in metrics_doc["results"] if row["model"] != "baseline"]
+    for row in rows:
+        if str(row.get("adc_resolution")) != "0":
+            raise ValueError(f"{row['model']} 的 adc_resolution 不是 0，拒绝用于 ADC=0 图。")
+    rows.sort(key=lambda row: int(row["tile_rows"]))
+    return {
+        "sizes": [int(row["tile_rows"]) for row in rows],
+        "bleu4": [row["metrics"]["Bleu_4"] for row in rows],
+        "cider": [row["metrics"]["CIDEr"] for row in rows],
+    }
+
+
+def make_fig5(output_dir: Path, formats: list[str], cell_metrics_json: Path, array_metrics_json: Path) -> None:
     """Fig. 5: cell_bits / array_size sensitivity."""
+    cell_doc = read_metrics_json(cell_metrics_json)
+    array_doc = read_metrics_json(array_metrics_json)
+    cell_sweep = extract_cell_bits_sweep(cell_doc)
+    array_sweep = extract_array_size_sweep(array_doc)
+    cell_baseline = extract_baseline(cell_doc)
+    array_baseline = extract_baseline(array_doc)
+
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.8), constrained_layout=True)
     plot_dual_metric_line(
         axes[0],
-        CELL_BITS_SWEEP["bits"],
-        CELL_BITS_SWEEP["bleu4"],
-        CELL_BITS_SWEEP["cider"],
+        cell_sweep["bits"],
+        cell_sweep["bleu4"],
+        cell_sweep["cider"],
         "cell_bits",
         "cell_bits sweep",
-        xticklabels=CELL_BITS_SWEEP["labels"],
+        xticklabels=cell_sweep["labels"],
+        baseline=cell_baseline,
     )
     plot_dual_metric_line(
         axes[1],
-        ARRAY_SIZE_SWEEP["sizes"],
-        ARRAY_SIZE_SWEEP["bleu4"],
-        ARRAY_SIZE_SWEEP["cider"],
+        array_sweep["sizes"],
+        array_sweep["bleu4"],
+        array_sweep["cider"],
         "array_size",
         "array_size sweep",
-        xticklabels=[str(size) for size in ARRAY_SIZE_SWEEP["sizes"]],
+        xticklabels=[str(size) for size in array_sweep["sizes"]],
+        baseline=array_baseline,
     )
-    save_figure(fig, output_dir, "fig5_cell_bits_array_size_sensitivity", formats)
+    save_figure(fig, output_dir, "fig5_cell_bits_array_size_sensitivity", formats, close=False)
+    save_figure(fig, output_dir, "cell_array_sensitivity", formats)
 
 
 def make_fig6(output_dir: Path, formats: list[str]) -> None:
@@ -347,6 +405,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("experiments/spice/results/cmm_crosssim_read_energy/spice_validation.csv"),
     )
+    parser.add_argument(
+        "--cell-metrics-json",
+        type=Path,
+        default=DEFAULT_CELL_METRICS_JSON,
+        help="batchsize=64 cell_bits metrics JSON.",
+    )
+    parser.add_argument(
+        "--array-metrics-json",
+        type=Path,
+        default=DEFAULT_ARRAY_METRICS_JSON,
+        help="batchsize=64 ADC=0 array_size metrics JSON.",
+    )
     return parser.parse_args()
 
 
@@ -358,7 +428,7 @@ def main() -> None:
 
     configure_style()
     make_fig4(output_dir, formats)
-    make_fig5(output_dir, formats)
+    make_fig5(output_dir, formats, args.cell_metrics_json, args.array_metrics_json)
     make_fig6(output_dir, formats)
     make_fig7(output_dir, formats)
     make_fig10(output_dir, formats, args.spice_validation_csv)
