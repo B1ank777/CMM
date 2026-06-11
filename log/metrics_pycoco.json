@@ -1,0 +1,161 @@
+{
+  "num_images": 500,
+  "image_id_range": [
+    391895,
+    289423
+  ],
+  "results": [
+    {
+      "model": "baseline",
+      "checkpoint": "checkpoints/caption_transformer_epoch_10.pt",
+      "metrics": {
+        "Bleu_1": 0.6829011174360777,
+        "Bleu_2": 0.5015588348353556,
+        "Bleu_3": 0.3534514524689875,
+        "Bleu_4": 0.24870652005500196,
+        "METEOR": 0.22837320144187664,
+        "ROUGE_L": 0.4964404899485146,
+        "CIDEr": 0.8574099096196268,
+        "SPICE": 0.16868721861215868
+      }
+    },
+    {
+      "model": "cell-continuous",
+      "checkpoint": "checkpoints/cmm_crosssim_cell_bits_conditions/caption_transformer_cell-continuous_cmm_crosssim.pt",
+      "cell_bits": "0",
+      "tile_shape": "128x128",
+      "adc_resolution": "0",
+      "dac_resolution": "0",
+      "write_noise_std": "0.0001",
+      "crosssim_programming_error_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "seed": "42",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.6825664837482729,
+        "Bleu_2": 0.5007677011483518,
+        "Bleu_3": 0.3523386662528015,
+        "Bleu_4": 0.2471031541135048,
+        "METEOR": 0.22767616630333168,
+        "ROUGE_L": 0.4957126688466896,
+        "CIDEr": 0.8533329101954547,
+        "SPICE": 0.16793504333580994
+      }
+    },
+    {
+      "model": "cell-2bit",
+      "checkpoint": "checkpoints/cmm_crosssim_cell_bits_conditions/caption_transformer_cell-2bit_cmm_crosssim.pt",
+      "cell_bits": "2",
+      "tile_shape": "128x128",
+      "adc_resolution": "0",
+      "dac_resolution": "0",
+      "write_noise_std": "0.0001",
+      "crosssim_programming_error_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "seed": "42",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.012355905294401025,
+        "Bleu_2": 0.0013291989692372182,
+        "Bleu_3": 5.078727111025666e-09,
+        "Bleu_4": 1.0021643474180796e-11,
+        "METEOR": 0.014281796189196325,
+        "ROUGE_L": 0.017896010263812486,
+        "CIDEr": 0.00021893674168592256,
+        "SPICE": 0.014167146644473263
+      }
+    },
+    {
+      "model": "cell-3bit",
+      "checkpoint": "checkpoints/cmm_crosssim_cell_bits_conditions/caption_transformer_cell-3bit_cmm_crosssim.pt",
+      "cell_bits": "3",
+      "tile_shape": "128x128",
+      "adc_resolution": "0",
+      "dac_resolution": "0",
+      "write_noise_std": "0.0001",
+      "crosssim_programming_error_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "seed": "42",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.5628437563657439,
+        "Bleu_2": 0.39464244427899925,
+        "Bleu_3": 0.26403487635417483,
+        "Bleu_4": 0.17090449835458643,
+        "METEOR": 0.1976505989129383,
+        "ROUGE_L": 0.4248159759593311,
+        "CIDEr": 0.6596686449289125,
+        "SPICE": 0.14241431028828117
+      }
+    },
+    {
+      "model": "cell-4bit",
+      "checkpoint": "checkpoints/cmm_crosssim_cell_bits_conditions/caption_transformer_cell-4bit_cmm_crosssim.pt",
+      "cell_bits": "4",
+      "tile_shape": "128x128",
+      "adc_resolution": "0",
+      "dac_resolution": "0",
+      "write_noise_std": "0.0001",
+      "crosssim_programming_error_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "seed": "42",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.653065367437951,
+        "Bleu_2": 0.47946438015398307,
+        "Bleu_3": 0.33446788197792054,
+        "Bleu_4": 0.22579442494106128,
+        "METEOR": 0.22427202258759685,
+        "ROUGE_L": 0.48891570151097824,
+        "CIDEr": 0.799130834535258,
+        "SPICE": 0.16210879702239092
+      }
+    },
+    {
+      "model": "cell-6bit",
+      "checkpoint": "checkpoints/cmm_crosssim_cell_bits_conditions/caption_transformer_cell-6bit_cmm_crosssim.pt",
+      "cell_bits": "6",
+      "tile_shape": "128x128",
+      "adc_resolution": "0",
+      "dac_resolution": "0",
+      "write_noise_std": "0.0001",
+      "crosssim_programming_error_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "seed": "42",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.6713893000632963,
+        "Bleu_2": 0.4918819077141293,
+        "Bleu_3": 0.3468274229927868,
+        "Bleu_4": 0.24325422001667998,
+        "METEOR": 0.2249225180311874,
+        "ROUGE_L": 0.4892601639304851,
+        "CIDEr": 0.8365920413292101,
+        "SPICE": 0.164017463465647
+      }
+    },
+    {
+      "model": "cell-8bit",
+      "checkpoint": "checkpoints/cmm_crosssim_cell_bits_conditions/caption_transformer_cell-8bit_cmm_crosssim.pt",
+      "cell_bits": "8",
+      "tile_shape": "128x128",
+      "adc_resolution": "0",
+      "dac_resolution": "0",
+      "write_noise_std": "0.0001",
+      "crosssim_programming_error_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "seed": "42",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.6782334384856618,
+        "Bleu_2": 0.4973769732038697,
+        "Bleu_3": 0.3498578222725204,
+        "Bleu_4": 0.24547553412092618,
+        "METEOR": 0.22772670548706883,
+        "ROUGE_L": 0.49478878225078127,
+        "CIDEr": 0.8503077088818277,
+        "SPICE": 0.16682812515674256
+      }
+    }
+  ]
+}
