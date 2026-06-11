@@ -1,0 +1,128 @@
+{
+  "num_images": 500,
+  "image_id_range": [
+    391895,
+    289423
+  ],
+  "results": [
+    {
+      "model": "baseline",
+      "checkpoint": "checkpoints/caption_transformer_epoch_10.pt",
+      "metrics": {
+        "Bleu_1": 0.6829011174360777,
+        "Bleu_2": 0.5015588348353556,
+        "Bleu_3": 0.3534514524689875,
+        "Bleu_4": 0.24870652005500196,
+        "METEOR": 0.22837320144187664,
+        "ROUGE_L": 0.4964404899485146,
+        "CIDEr": 0.8574099096196268,
+        "SPICE": 0.16868721861215868
+      }
+    },
+    {
+      "model": "adc-12bit",
+      "checkpoint": "checkpoints/cmm_crosssim_adc_conditions/caption_transformer_adc-12bit_cmm_crosssim.pt",
+      "adc_resolution": "12",
+      "dac_resolution": "0",
+      "tile_shape": "128x128",
+      "cell_bits": "0",
+      "write_noise_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.6792137181094355,
+        "Bleu_2": 0.49966882827577996,
+        "Bleu_3": 0.35276721100715663,
+        "Bleu_4": 0.24804365567285902,
+        "METEOR": 0.22908203556550918,
+        "ROUGE_L": 0.4970443730716489,
+        "CIDEr": 0.8567747433140502,
+        "SPICE": 0.16853880110126562
+      }
+    },
+    {
+      "model": "adc-10bit",
+      "checkpoint": "checkpoints/cmm_crosssim_adc_conditions/caption_transformer_adc-10bit_cmm_crosssim.pt",
+      "adc_resolution": "10",
+      "dac_resolution": "0",
+      "tile_shape": "128x128",
+      "cell_bits": "0",
+      "write_noise_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.6627058578276709,
+        "Bleu_2": 0.4890841929551346,
+        "Bleu_3": 0.3462613545918416,
+        "Bleu_4": 0.24258081701569353,
+        "METEOR": 0.2222947083789238,
+        "ROUGE_L": 0.4894014774088397,
+        "CIDEr": 0.8391568291276653,
+        "SPICE": 0.1649056484985605
+      }
+    },
+    {
+      "model": "adc-8bit",
+      "checkpoint": "checkpoints/cmm_crosssim_adc_conditions/caption_transformer_adc-8bit_cmm_crosssim.pt",
+      "adc_resolution": "8",
+      "dac_resolution": "0",
+      "tile_shape": "128x128",
+      "cell_bits": "0",
+      "write_noise_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.6334179191878521,
+        "Bleu_2": 0.4544016001695178,
+        "Bleu_3": 0.3122650049123878,
+        "Bleu_4": 0.212363192295107,
+        "METEOR": 0.21654325735079177,
+        "ROUGE_L": 0.47881407255525915,
+        "CIDEr": 0.7487193434950145,
+        "SPICE": 0.15579755089739813
+      }
+    },
+    {
+      "model": "adc-6bit",
+      "checkpoint": "checkpoints/cmm_crosssim_adc_conditions/caption_transformer_adc-6bit_cmm_crosssim.pt",
+      "adc_resolution": "6",
+      "dac_resolution": "0",
+      "tile_shape": "128x128",
+      "cell_bits": "0",
+      "write_noise_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.2889442231075409,
+        "Bleu_2": 0.1530109697435316,
+        "Bleu_3": 0.06154220766871988,
+        "Bleu_4": 0.025706640939533502,
+        "METEOR": 0.11484052555979762,
+        "ROUGE_L": 0.280664729110544,
+        "CIDEr": 0.06696078516328324,
+        "SPICE": 0.0634447563483242
+      }
+    },
+    {
+      "model": "adc-4bit",
+      "checkpoint": "checkpoints/cmm_crosssim_adc_conditions/caption_transformer_adc-4bit_cmm_crosssim.pt",
+      "adc_resolution": "4",
+      "dac_resolution": "0",
+      "tile_shape": "128x128",
+      "cell_bits": "0",
+      "write_noise_std": "0.0001",
+      "read_noise_std": "0.0001",
+      "num_mapped_linear": "21",
+      "metrics": {
+        "Bleu_1": 0.06062905228306934,
+        "Bleu_2": 0.0062435076755422755,
+        "Bleu_3": 1.424063292788034e-08,
+        "Bleu_4": 2.171090044355614e-11,
+        "METEOR": 0.013074346772216104,
+        "ROUGE_L": 0.09341411390203629,
+        "CIDEr": 4.421286275448803e-06,
+        "SPICE": 0.00010526315789473685
+      }
+    }
+  ]
+}
